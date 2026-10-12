@@ -85,3 +85,33 @@ def test_union_bbox_handles_antimeridian():
     d02 = [154.9, -5.2, 175.0, 5.0]
     assert _union_bbox([d01, d02]) == [113.6, -31.6, -65.6, 39.7]
     assert _union_bbox([[-10, 0, 10, 5], [20, -5, 30, 1]]) == [-10, -5, 30, 5]
+
+
+def test_catalog_keeps_runs_from_earlier_invocations(tmp_path):
+    from conftest import T0
+    from wrf_fixture import hourly, write_wrfout
+
+    for name in ("runA", "runB"):
+        write_wrfout(tmp_path / name, hourly(T0, 2))
+    out = tmp_path / "atlas"
+    run = lambda name: run_pipeline(  # noqa: E731
+        PipelineOptions(inputs=[tmp_path / name], output=out, plots=False), report=lambda m: None)
+
+    run("runA")
+    run("runB")
+    run("runA")  # regenerated: still listed once, in its original place
+    children = [ln["href"] for ln in json.loads((out / "catalog.json").read_text())["links"]
+                if ln["rel"] == "child"]
+    assert children == ["./runA/collection.json", "./runB/collection.json"]
+    cat = pystac.Catalog.from_file(str(out / "catalog.json"))
+    assert sorted(c.id for c in cat.get_children()) == ["runA", "runB"]
+    assert validate_catalog(out / "catalog.json", schemas=False).ok
+
+    # A collection deleted from disk is dropped instead of left as a broken link.
+    import shutil
+
+    shutil.rmtree(out / "runA")
+    run("runB")
+    children = [ln["href"] for ln in json.loads((out / "catalog.json").read_text())["links"]
+                if ln["rel"] == "child"]
+    assert children == ["./runB/collection.json"]

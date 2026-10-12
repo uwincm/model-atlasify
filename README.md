@@ -124,7 +124,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitat
 | option | meaning |
 |---|---|
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
-| `-o, --output` | Output directory (default `./atlas`). Existing files with the same names are overwritten; nothing else is deleted. |
+| `-o, --output` | Output directory (default `./atlas`). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--variables` | `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), or exact names such as `precipitation_interval`. |
 | `--domains` | Only process these WRF domains. |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |

@@ -13,10 +13,17 @@ Composite maps (all domains of a run on one map) are written alongside, under
 
 The catalog is saved "self-contained": every link and asset href is relative,
 so the whole tree can be moved or uploaded (e.g. to object storage) intact.
+
+An output directory accumulates runs: collections already listed in an
+existing catalog.json are kept (if their collection.json still exists), and
+a run that is generated again keeps its place instead of being listed twice.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,6 +39,8 @@ from modelatlasify.core.variables import get_variable
 from modelatlasify.geospatial.footprint import Footprint, grid_footprint
 from modelatlasify.geospatial.geotiff import MEDIA_TYPE as COG_MEDIA_TYPE
 from modelatlasify.geospatial.geotiff import RasterInfo
+
+log = logging.getLogger(__name__)
 
 FORECAST_EXTENSION = "https://stac-extensions.github.io/forecast/v0.2.0/schema.json"
 CATALOG_ID = "modelatlasify"
@@ -308,8 +317,39 @@ class CatalogBuilder:
         return out
 
     def save(self) -> Path:
-        self.catalog.set_self_href(str(self.output_dir / "catalog.json"))
+        path = self.output_dir / "catalog.json"
+        previous = self._existing_children(path)  # read before it is overwritten
+        self.catalog.set_self_href(str(path))
         # Children and items already have explicit self hrefs; keep them.
         self.catalog.make_all_asset_hrefs_relative()
         self.catalog.save(catalog_type=pystac.CatalogType.SELF_CONTAINED)
-        return self.output_dir / "catalog.json"
+        if previous:
+            self._merge_children(path, previous)
+        return path
+
+    def _existing_children(self, path: Path) -> list[dict]:
+        """Child links of an existing catalog.json whose targets still exist."""
+        if not path.is_file():
+            return []
+        try:
+            links = json.loads(path.read_text()).get("links", [])
+        except (OSError, ValueError) as exc:
+            log.warning("Existing %s is unreadable (%s); it is replaced.", path, exc)
+            return []
+        return [ln for ln in links
+                if ln.get("rel") == "child" and isinstance(ln.get("href"), str)
+                and (path.parent / ln["href"]).is_file()]
+
+    @staticmethod
+    def _merge_children(path: Path, previous: list[dict]) -> None:
+        """Keep previously cataloged collections: old children first, in their
+        order, then this run's new ones. Targets are compared by resolved path."""
+        def key(link: dict) -> str:
+            return os.path.normpath(path.parent / link["href"])
+
+        cat = json.loads(path.read_text())
+        current = [ln for ln in cat["links"] if ln.get("rel") == "child"]
+        old_keys = {key(ln) for ln in previous}
+        children = previous + [ln for ln in current if key(ln) not in old_keys]
+        cat["links"] = [ln for ln in cat["links"] if ln.get("rel") != "child"] + children
+        path.write_text(json.dumps(cat, indent=2))
