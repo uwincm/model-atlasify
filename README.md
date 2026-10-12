@@ -37,6 +37,8 @@ output, two variables, run from the command line.
 The environment is managed with [Pixi](https://pixi.sh). The conda-forge
 packages keep the GDAL/PROJ/GEOS binaries consistent.
 
+The instructions to install Pixi if you don't already have it are [here](https://pixi.prefix.dev/latest/installation/).
+
 ```bash
 git clone <this repo> modelatlasify
 cd modelatlasify
