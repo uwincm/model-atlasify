@@ -21,6 +21,12 @@ output, two variables, run from the command line.
 - **WRF** atmosphere-only history output (`wrfout_d<NN>_<YYYY-MM-DD_HH:MM:SS>`),
   multiple files, multiple times per file, multiple domains, and multiple run
   directories in one call
+- **Moving nests** (e.g. vortex-following d02/d03): each valid time is placed
+  where the nest actually was, using that time's XLAT/XLONG. This applies to the
+  GeoTIFF georeferencing, the per-item maps, the STAC Item geometry/bbox and
+  `proj:*` fields, and the composite maps. Interval precipitation is
+  differenced at the same location, not the same array index. Cells that
+  entered the nest during the interval are missing.
 - **Surface wind speed** (10 m), in m s-1
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration

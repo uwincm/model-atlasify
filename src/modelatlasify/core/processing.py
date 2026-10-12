@@ -84,7 +84,8 @@ def discover(adapter: ModelAdapter, inputs: list[Path], domains: list[str] | Non
             report(
                 f"  {d.dataset_id}: {len(d.files)} file(s), {len(d.valid_times)} time(s) "
                 f"{d.valid_times[0]:%Y-%m-%d %H:%M} -> {d.valid_times[-1]:%Y-%m-%d %H:%M} UTC, "
-                f"{g.width}x{g.height} grid, georeference fit error {g.max_georeference_error_m:.1f} m."
+                f"{g.width}x{g.height} grid, georeference fit error {g.max_georeference_error_m:.1f} m"
+                + (f", moving nest ({len(d.distinct_grids())} positions)." if d.moving else ".")
             )
     return runs
 
@@ -155,13 +156,13 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
             res.quality_skips.append(f"{ds.dataset_id} {valid:%Y-%m-%d %H:%M} {vname}: {reason}")
             continue
         tif = item_dir / f"{vname}.tif"
-        info = write_geotiff(tif, fld, ds.grid, var, extra_tags={
+        info = write_geotiff(tif, fld, ds.grid_at(ti), var, extra_tags={
             "model": ds.model, "run_id": ds.run_id, "dataset": ds.dataset_id,
         })
         if plot_field is not None:
             png = item_dir / f"{vname}.png"
             title, subtitle = _titles(ds, fld, var.long_name, var.units)
-            plot_field(png, fld, ds.grid, var, title, subtitle)
+            plot_field(png, fld, ds.grid_at(ti), var, title, subtitle)
         meta = dataclasses.replace(fld, data=None)  # the catalog needs no pixels
         res.assets.append(AssetRecord(vname, tif, vname, "data", meta, info))
         res.n_tif += 1
@@ -186,8 +187,10 @@ class _CompositeTask:
     run_id: str
     variable: str
     path: Path
-    base: tuple[str, Path, FieldResult]  # (dataset_id, GeoTIFF, field metadata)
-    nests: list[tuple[str, Path | None]]  # (dataset_id, GeoTIFF or None = outline only)
+    base: tuple[str, int, Path, FieldResult]  # (dataset_id, time index, GeoTIFF, metadata)
+    # (dataset_id, time index or None for a fixed nest without output then,
+    #  GeoTIFF or None = outline only)
+    nests: list[tuple[str, int | None, Path | None]]
 
 
 def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
@@ -198,24 +201,30 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
     ``products`` maps (dataset_id, valid time, variable) to the published
     GeoTIFF. A nest is overlaid only when its product covers the same period as
     the base's (e.g. not when a nest started accumulating later); otherwise, or
-    when it has no product at that time, only its outline is drawn.
+    when it has no product at that time, only its outline is drawn. Moving
+    nests are drawn where they were at that time; a moving nest without
+    output at that time is left out, since its position is unknown.
     """
     base, *nests = sorted(datasets, key=lambda d: d.dataset_id)
     tasks = []
-    for valid in base.valid_times:
+    nest_times = {n.dataset_id: {t: i for i, t in enumerate(n.valid_times)} for n in nests}
+    for bi, valid in enumerate(base.valid_times):
         for vname in variables:
             if (base.dataset_id, valid, vname) not in products:
                 continue  # not defined or failed sanity checks
             tif, meta = products[(base.dataset_id, valid, vname)]
             overlays = []
             for nest in nests:
+                ni = nest_times[nest.dataset_id].get(valid)
+                if ni is None and nest.moving:
+                    continue
                 p = products.get((nest.dataset_id, valid, vname))
                 same_period = p is not None and (p[1].start_time, p[1].end_time) == (
                     meta.start_time, meta.end_time)
-                overlays.append((nest.dataset_id, p[0] if same_period else None))
+                overlays.append((nest.dataset_id, ni, p[0] if same_period else None))
             tasks.append(_CompositeTask(
                 base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
-                (base.dataset_id, tif, meta), overlays))
+                (base.dataset_id, bi, tif, meta), overlays))
     return tasks
 
 
@@ -228,16 +237,19 @@ def _read_tif(path: Path) -> np.ndarray:
 
 def _plot_composite(task: _CompositeTask) -> Path:
     datasets = _worker["datasets"]
-    base_id, base_tif, meta = task.base
+    base_id, bi, base_tif, meta = task.base
     base_ds: ModelDataset = datasets[(task.run_id, base_id)]
     var = get_variable(task.variable)
-    nests = [(None if tif is None else _read_tif(tif), datasets[(task.run_id, nid)].grid)
-             for nid, tif in task.nests]
+    nests = []
+    for nid, ni, tif in task.nests:
+        nest: ModelDataset = datasets[(task.run_id, nid)]
+        grid = nest.grid if ni is None else nest.grid_at(ni)
+        nests.append((None if tif is None else _read_tif(tif), grid))
     title, subtitle = _titles(base_ds, meta, var.long_name, var.units)
-    overlaid = [nid for nid, tif in task.nests if tif is not None]
+    overlaid = [nid for nid, _, tif in task.nests if tif is not None]
     subtitle += "".join(f" + {nid}" for nid in overlaid)
-    return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid), nests,
-                                     var, title, subtitle)
+    return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid_at(bi)),
+                                     nests, var, title, subtitle)
 
 
 def _log_levels() -> dict[str, int]:

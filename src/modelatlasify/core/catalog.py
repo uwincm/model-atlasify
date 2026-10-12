@@ -115,7 +115,7 @@ class CatalogBuilder:
                 "maps) described with STAC."
             ),
         )
-        self._footprints: dict[tuple[str, str], Footprint] = {}
+        self._footprints: dict[tuple, Footprint] = {}
 
     def run_dir(self, run_id: str) -> Path:
         return self.output_dir / run_id
@@ -123,16 +123,27 @@ class CatalogBuilder:
     def item_dir(self, dataset: ModelDataset, valid_time: datetime) -> Path:
         return self.run_dir(dataset.run_id) / "items" / item_id(dataset, valid_time)
 
-    def footprint(self, dataset: ModelDataset) -> Footprint:
-        key = (dataset.run_id, dataset.dataset_id)
+    def footprint(self, dataset: ModelDataset, time_index: int = 0) -> Footprint:
+        """Footprint of the dataset's grid at a valid time (moving nests move)."""
+        grid = dataset.grid_at(time_index)
+        key = (dataset.run_id, dataset.dataset_id, tuple(grid.transform))
         if key not in self._footprints:
-            self._footprints[key] = grid_footprint(dataset.grid)
+            self._footprints[key] = grid_footprint(grid)
         return self._footprints[key]
+
+    def dataset_bbox(self, dataset: ModelDataset) -> list[float]:
+        """bbox of everywhere the dataset's grid is at any valid time."""
+        if not dataset.moving:
+            return self.footprint(dataset).bbox
+        firsts = {}
+        for ti, g in enumerate(dataset.time_grids):
+            firsts.setdefault(tuple(g.transform), ti)
+        return _union_bbox([self.footprint(dataset, ti).bbox for ti in firsts.values()])
 
     # ------------------------------------------------------------------ items
     def build_item(self, rec: ItemRecord) -> pystac.Item:
         ds = rec.dataset
-        fp = self.footprint(ds)
+        fp = self.footprint(ds, rec.time_index)
         valid = rec.valid_time
         props: dict[str, Any] = {
             "title": f"{ds.model} {ds.run_id} {ds.dataset_id} valid {valid:%Y-%m-%d %H:%M} UTC",
@@ -155,7 +166,7 @@ class CatalogBuilder:
         )
         item.stac_extensions.append(FORECAST_EXTENSION)
 
-        g = ds.grid
+        g = ds.grid_at(rec.time_index)
         proj = ProjectionExtension.ext(item, add_if_missing=True)
         proj.code = g.crs.to_epsg()  # None for WRF's custom spherical CRS ...
         proj.wkt2 = g.crs.to_wkt()  # ... so the full WKT2 definition is given
@@ -207,16 +218,16 @@ class CatalogBuilder:
     # ------------------------------------------------------------ collection
     def add_run(self, run_id: str, datasets: list[ModelDataset], items: list[pystac.Item],
                 variables: list[str]) -> pystac.Collection:
-        fps = [self.footprint(d) for d in datasets]
+        ds_bboxes = [self.dataset_bbox(d) for d in datasets]
         # STAC: the first bbox is the overall extent; sub-extents only when >1.
-        bboxes = [fps[0].bbox] if len(fps) == 1 else (
-            [_union_bbox([fp.bbox for fp in fps])] + [fp.bbox for fp in fps])
+        bboxes = [ds_bboxes[0]] if len(ds_bboxes) == 1 else (
+            [_union_bbox(ds_bboxes)] + ds_bboxes)
         times = sorted(t for d in datasets for t in d.valid_times)
         model = datasets[0].model
         parent = min(datasets, key=lambda d: d.dataset_id)
 
         domains = []
-        for d, fp in zip(datasets, fps):
+        for d, bbox in zip(datasets, ds_bboxes):
             g = d.grid
             domains.append({
                 "id": d.dataset_id,
@@ -224,13 +235,14 @@ class CatalogBuilder:
                 "grid": g.description,
                 "shape": [g.height, g.width],
                 "resolution_m": [abs(g.transform.a), abs(g.transform.e)],
-                "bbox": fp.bbox,
+                "bbox": bbox,  # for a moving nest: everywhere it went
                 "crs_wkt2": g.crs.to_wkt(),
                 "georeference_max_error_m": round(g.max_georeference_error_m or 0.0, 3),
                 "n_times": len(d.valid_times),
                 "start_datetime": d.valid_times[0].strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "end_datetime": d.valid_times[-1].strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "source_files": [p.name for p in d.files],
+                **({"moving": True, "n_positions": len(d.distinct_grids())} if d.moving else {}),
             })
 
         # Run-level metadata: attributes identical across all domains.

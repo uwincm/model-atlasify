@@ -33,8 +33,10 @@ class GridDefinition:
     transform: Affine
     width: int
     height: int
-    lat: np.ndarray  # (height, width), north-up, degrees north
-    lon: np.ndarray  # (height, width), north-up, degrees east in [-180, 180)
+    # (height, width), north-up. None where they are not kept (per-time grids
+    # of moving nests): crs + transform describe the grid exactly anyway.
+    lat: np.ndarray | None = None  # degrees north
+    lon: np.ndarray | None = None  # degrees east in [-180, 180)
     description: str = ""
     max_georeference_error_m: float | None = None
 
@@ -50,6 +52,37 @@ class GridDefinition:
         ys = (t.f, t.f + t.e * self.height)
         return (min(xs), min(ys), max(xs), max(ys))
 
+    def pixel_offset(self, other: GridDefinition) -> tuple[int, int] | None:
+        """(rows, cols) by which ``other`` is shifted relative to this grid, i.e.
+        pixel (r, c) of this grid is pixel (r + rows, c + cols) of ``other``;
+        None unless both are the same lattice shifted by whole cells."""
+        a, b = self.transform, other.transform
+        if (self.crs != other.crs or self.shape != other.shape
+                or not np.allclose((a.a, a.b, a.d, a.e), (b.a, b.b, b.d, b.e))):
+            return None
+        cols = (a.c - b.c) / b.a
+        rows = (a.f - b.f) / b.e
+        if abs(cols - round(cols)) > 0.01 or abs(rows - round(rows)) > 0.01:
+            return None
+        return int(round(rows)), int(round(cols))
+
+
+def shift_to_grid(data: np.ndarray, src: GridDefinition, dst: GridDefinition) -> np.ndarray:
+    """Re-index a north-up field on ``src`` onto ``dst``, a whole-cell shift of
+    the same lattice (e.g. a moving nest at a later time). Points of ``dst``
+    outside ``src`` are NaN."""
+    offset = dst.pixel_offset(src)
+    if offset is None:
+        raise ValueError("grids are not whole-cell shifts of the same lattice")
+    dr, dc = offset
+    h, w = dst.shape
+    out = np.full((h, w), np.nan)
+    r0, r1 = max(0, -dr), min(h, h - dr)
+    c0, c1 = max(0, -dc), min(w, w - dc)
+    if r0 < r1 and c0 < c1:
+        out[r0:r1, c0:c1] = data[r0 + dr:r1 + dr, c0 + dc:c1 + dc]
+    return out
+
 
 @dataclass
 class ModelDataset:
@@ -57,6 +90,10 @@ class ModelDataset:
 
     For WRF this is a single domain (e.g. d01) of a single run. Several datasets
     with the same ``run_id`` (e.g. d01 and d02) belong to the same model run.
+
+    A domain whose position changes over time (a moving nest) has one grid
+    per valid time in ``time_grids``; use :meth:`grid_at`. ``grid`` is then
+    the grid at the first valid time.
     """
 
     model: str  # e.g. "WRF"
@@ -71,8 +108,27 @@ class ModelDataset:
     source_dir: Path | None = None
     #: The file holding each valid time (parallel to ``valid_times``).
     time_sources: list[Path] = field(default_factory=list)
+    #: Grid at each valid time (parallel to ``valid_times``) for moving
+    #: domains; None when the grid is fixed.
+    time_grids: list[GridDefinition] | None = field(default=None, repr=False)
     #: Opaque, adapter-private bookkeeping (e.g. which file/index holds each time).
     adapter_state: Any = field(default=None, repr=False)
+
+    @property
+    def moving(self) -> bool:
+        return self.time_grids is not None
+
+    def grid_at(self, time_index: int) -> GridDefinition:
+        return self.grid if self.time_grids is None else self.time_grids[time_index]
+
+    def distinct_grids(self) -> list[GridDefinition]:
+        """Every position the grid takes, in time order, without repeats."""
+        if self.time_grids is None:
+            return [self.grid]
+        seen: dict[tuple, GridDefinition] = {}
+        for g in self.time_grids:
+            seen.setdefault(tuple(g.transform), g)
+        return list(seen.values())
 
 
 @dataclass

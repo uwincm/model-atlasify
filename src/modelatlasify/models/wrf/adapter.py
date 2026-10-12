@@ -7,6 +7,7 @@ native WRF fields.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from collections import Counter, defaultdict
@@ -18,8 +19,9 @@ from typing import Any
 import netCDF4
 import numpy as np
 
-from modelatlasify.core.errors import DiscoveryError, FieldQualityError, VariableUnavailableError
-from modelatlasify.core.model import FieldResult, ModelAdapter, ModelDataset
+from modelatlasify.core.errors import (DiscoveryError, FieldQualityError, GeoreferenceError,
+                                       VariableUnavailableError)
+from modelatlasify.core.model import FieldResult, GridDefinition, ModelAdapter, ModelDataset, shift_to_grid
 from modelatlasify.models.wrf.projection import MAP_PROJ_NAMES, wrf_grid
 from modelatlasify.variables.precipitation import NEGATIVE_TOLERANCE_MM, interval_precipitation
 from modelatlasify.variables.wind import destagger, wind_speed
@@ -30,6 +32,11 @@ log = logging.getLogger(__name__)
 #: output at more than this fraction of grid points is rejected as corrupt (or
 #: as an accumulation reset ModelAtlasify does not understand).
 MAX_DECREASE_FRACTION = 0.01
+#: The same for moving nests. WRF moves a nest several times between outputs,
+#: and cells that leave and re-enter it are re-interpolated from the parent,
+#: which can lower their accumulation (seen at up to ~4% of a vortex-following
+#: d03 per hour). Zero-filled output still fails by a wide margin.
+MAX_DECREASE_FRACTION_MOVING = 0.2
 
 WRFOUT_PATTERN = re.compile(r"^wrfout_d(?P<domain>\d{2})_(?P<time>\d{4}-\d{2}-\d{2}_\d{2}[:_]\d{2}[:_]\d{2})")
 WRF_TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
@@ -146,8 +153,8 @@ class WRFAdapter(ModelAdapter):
         self.skipped_files.append((path, reason))
 
     @staticmethod
-    def _read_header(path: Path) -> tuple[list[datetime], dict, tuple]:
-        """Times, global attributes and grid-corner signature of one file.
+    def _read_header(path: Path) -> tuple[list[datetime], dict, list[tuple]]:
+        """Times, global attributes and grid-corner signature at each time of one file.
 
         Raises ValueError with a readable reason if the file is unusable.
         """
@@ -176,13 +183,12 @@ class WRFAdapter(ModelAdapter):
                                 f"with Times ({t:%Y-%m-%d %H:%M}); file content appears corrupt"
                             )
 
-            # Grid signature: the four corner coordinates at the first time.
-            lat = nc.variables["XLAT"]
-            lon = nc.variables["XLONG"]
-            corners = tuple(
-                round(float(v[0, j, i]), 3)
-                for v in (lat, lon) for j in (0, -1) for i in (0, -1)
-            )
+            # Grid signature per time: the four corner coordinates (moving
+            # nests change position between, and within, files).
+            cols = [np.atleast_1d(np.ma.getdata(v[:, j, i])).astype(np.float64)
+                    for v in (nc.variables["XLAT"], nc.variables["XLONG"])
+                    for j in (0, -1) for i in (0, -1)]
+            corners = [tuple(round(float(c[n]), 3) for c in cols) for n in range(len(times))]
         return times, attrs, corners
 
     def discover(self, directory: Path) -> list[ModelDataset]:
@@ -216,7 +222,7 @@ class WRFAdapter(ModelAdapter):
             domain = int(attrs.get("GRID_ID", WRFOUT_PATTERN.match(path.name)["domain"]))
             sim_start = str(attrs.get("SIMULATION_START_DATE", "unknown")).strip()
             for i, t in enumerate(times):
-                per_group[(domain, sim_start)].append((t, _TimeSlot(path, i), attrs, corners))
+                per_group[(domain, sim_start)].append((t, _TimeSlot(path, i), attrs, corners[i]))
 
         if not per_group:
             raise DiscoveryError(
@@ -228,21 +234,12 @@ class WRFAdapter(ModelAdapter):
         starts_per_domain = Counter(d for d, _ in per_group)
         datasets = []
         for (domain, sim_start), entries in sorted(per_group.items()):
-            # All files of a domain must describe the same grid. The most common
-            # corner signature wins; others are corrupt (or a moving nest, which
-            # is not supported yet).
-            grid_sig = Counter(e[3] for e in entries).most_common(1)[0][0]
-            kept = []
-            for e in entries:
-                if e[3] != grid_sig:
-                    if e[1].path not in {p for p, _ in self.skipped_files}:
-                        self._skip(e[1].path, "XLAT/XLONG differ from the rest of the domain "
-                                              "(corrupt file or moving nest)")
-                    continue
-                kept.append(e)
-            kept.sort(key=lambda e: e[0])
+            entries.sort(key=lambda e: e[0])
+            grids = self._time_grids(domain, entries)
             unique: list[tuple] = []
-            for e in kept:
+            for e in entries:
+                if e[3] not in grids:
+                    continue
                 if unique and unique[-1][0] == e[0]:
                     log.warning(
                         "Duplicate valid time %s in %s and %s; using the first.",
@@ -250,21 +247,75 @@ class WRFAdapter(ModelAdapter):
                     )
                     continue
                 unique.append(e)
+            if not unique:
+                continue
             datasets.append(
-                self._make_dataset(directory, run_id, domain, sim_start, unique,
+                self._make_dataset(directory, run_id, domain, sim_start, unique, grids,
                                    split_by_start=starts_per_domain[domain] > 1,
                                    name_times=name_times.get(domain, set()))
             )
+        if not datasets:
+            raise DiscoveryError(
+                f"No usable WRF output in {directory} (e.g. {self.skipped_files[0][0].name}: "
+                f"{self.skipped_files[0][1]})."
+            )
         return datasets
 
-    def _make_dataset(self, directory, run_id, domain, sim_start, entries, split_by_start,
-                      name_times=frozenset()):
+    def _time_grids(self, domain: int, entries) -> dict[tuple, GridDefinition]:
+        """Grid for each usable corner signature of one domain (time-sorted entries).
+
+        The outer domain cannot move: the most common signature wins and other
+        files are corrupt. A nest may move (e.g. following a storm): every
+        position whose XLAT/XLONG form a regular grid that is a whole-cell shift
+        of the first position is kept. All positions use the first file's
+        attributes for the CRS, so they share one CRS (WRF rewrites CEN_LON as
+        a nest moves, which would otherwise shift a Mercator CRS).
+        """
+        sigs = Counter(e[3] for e in entries)
         attrs = entries[0][2]
-        first = entries[0][1]
-        with netCDF4.Dataset(first.path, "r") as nc:
-            xlat = np.asarray(nc.variables["XLAT"][first.index], dtype=np.float64)
-            xlong = np.asarray(nc.variables["XLONG"][first.index], dtype=np.float64)
-        grid = wrf_grid(attrs, xlat, xlong)
+        if domain == 1:
+            ref_sig = sigs.most_common(1)[0][0]
+            candidates = [ref_sig]
+        else:
+            candidates = list(dict.fromkeys(e[3] for e in entries))  # time order
+
+        grids: dict[tuple, GridDefinition] = {}
+        reasons: dict[tuple, str] = {}
+        ref: GridDefinition | None = None
+        for sig in candidates:
+            slot = next(e[1] for e in entries if e[3] == sig)
+            try:
+                with netCDF4.Dataset(slot.path, "r") as nc:
+                    xlat = np.asarray(nc.variables["XLAT"][slot.index], dtype=np.float64)
+                    xlong = np.asarray(nc.variables["XLONG"][slot.index], dtype=np.float64)
+                grid = wrf_grid(attrs, xlat, xlong)
+            except GeoreferenceError as exc:
+                reasons[sig] = f"XLAT/XLONG are not a valid grid ({exc})"
+                continue
+            if ref is None:
+                ref = grid
+            elif grid.pixel_offset(ref) is None:
+                reasons[sig] = ("XLAT/XLONG are not a whole-cell shift of the domain's grid "
+                                "(corrupt file?)")
+                continue
+            # Only the first position keeps its (large) lat/lon arrays.
+            grids[sig] = grid if not grids else dataclasses.replace(grid, lat=None, lon=None)
+
+        skipped = {p for p, _ in self.skipped_files}
+        for e in entries:
+            if e[3] in grids or e[1].path in skipped:
+                continue
+            skipped.add(e[1].path)
+            self._skip(e[1].path, reasons.get(
+                e[3], "XLAT/XLONG differ from the rest of the domain (corrupt file?)"))
+        return grids
+
+    def _make_dataset(self, directory, run_id, domain, sim_start, entries, grids,
+                      split_by_start, name_times=frozenset()):
+        attrs = entries[0][2]
+        positions = list(dict.fromkeys(e[3] for e in entries))
+        grid = grids[positions[0]]
+        time_grids = [grids[e[3]] for e in entries] if len(positions) > 1 else None
 
         try:
             reference_time = parse_wrf_time(sim_start)
@@ -306,6 +357,7 @@ class WRFAdapter(ModelAdapter):
             metadata=meta,
             source_dir=directory,
             time_sources=[e[1].path for e in entries],
+            time_grids=time_grids,
             adapter_state=_WRFState(slots=[e[1] for e in entries],
                                     accumulation_start=accumulation_start,
                                     output_interval=output_interval),
@@ -457,8 +509,12 @@ class WRFAdapter(ModelAdapter):
                 p -= 1
             if p >= 0:
                 prev, _ = self._accumulated_precip(dataset, p)
-                frac = float(np.mean(total < prev - NEGATIVE_TOLERANCE_MM))
-                if frac > MAX_DECREASE_FRACTION:
+                prev, _ = self._aligned(dataset, prev, p, t)
+                compared = np.isfinite(prev)  # a moving nest's new cells have no past
+                frac = float(np.sum(total < prev - NEGATIVE_TOLERANCE_MM)
+                             / max(int(compared.sum()), 1))
+                limit = MAX_DECREASE_FRACTION_MOVING if dataset.moving else MAX_DECREASE_FRACTION
+                if frac > limit:
                     problem = (
                         f"accumulated precipitation is lower than at "
                         f"{dataset.valid_times[p]:%Y-%m-%d %H:%M} UTC at {100 * frac:.1f}% of grid "
@@ -466,6 +522,21 @@ class WRFAdapter(ModelAdapter):
                     )
         self._accum_check[key] = problem
         return problem
+
+    @staticmethod
+    def _aligned(dataset: ModelDataset, prev: np.ndarray, p: int, t: int
+                 ) -> tuple[np.ndarray, tuple[int, int] | None]:
+        """A south-up field at time index p, re-indexed to the grid position at
+        time t (a moving nest's index (i, j) is a different place at each
+        position). Cells outside the earlier position are NaN. Also returns
+        the (rows, cols) shift, or None if the grid did not move."""
+        if not dataset.moving:
+            return prev, None
+        src, dst = dataset.grid_at(p), dataset.grid_at(t)
+        offset = dst.pixel_offset(src)
+        if offset == (0, 0):
+            return prev, None
+        return shift_to_grid(prev[::-1], src, dst)[::-1], offset
 
     def prepare(self, dataset: ModelDataset, variables: list[str]) -> None:
         """Run the accumulation check for every time, in order (each check
@@ -515,12 +586,15 @@ class WRFAdapter(ModelAdapter):
             a_start, _ = self._checked_accumulation(dataset, t - 1)
         except FieldQualityError as exc:
             raise FieldQualityError(f"previous output time is unusable: {exc}") from None
+        a_start, shift = self._aligned(dataset, a_start, t - 1, t)
         amount, n_bad = interval_precipitation(a_end, a_start)
         if n_bad:
             log.warning(
                 "%s %s: accumulated precipitation decreased at %d grid points since %s "
-                "(accumulation reset?); those points are set to missing.",
+                "(%s); those points are set to missing.",
                 dataset.dataset_id, end.isoformat(), n_bad, start.isoformat(),
+                "cells re-interpolated as the nest moved" if dataset.moving
+                else "accumulation reset?",
             )
         return FieldResult(
             "precipitation_interval", amount[::-1].copy(), end,
@@ -530,5 +604,9 @@ class WRFAdapter(ModelAdapter):
                 "method": f"[{prov['method'].split(';')[0]}](t) - [same](t - {end - start}), "
                 "differences > -0.01 mm clipped to 0, larger negative differences set missing",
                 "negative_points_masked": n_bad,
+                **({"moving_nest_shift_cells": {"rows": shift[0], "cols": shift[1]},
+                    "moving_nest_note": "the earlier field was shifted to the nest's position "
+                                        "at the valid time; cells new to the nest are missing"}
+                   if shift else {}),
             },
         )

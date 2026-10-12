@@ -37,14 +37,16 @@ def true_crs(p: dict) -> CRS:
     return CRS.from_proj4(f"{s} +R={R:.0f} +units=m +no_defs +type=crs")
 
 
-def grid_lonlat(p: dict, nx: int, ny: int, dx: float, dy: float):
-    """Mass-point lon/lat (south-up, like WRF) and the true SW mass point x/y."""
+def grid_lonlat(p: dict, nx: int, ny: int, dx: float, dy: float, shift=(0, 0)):
+    """Mass-point lon/lat (south-up, like WRF) and the true SW mass point x/y.
+
+    ``shift`` = (cols east, rows north) moves the grid by whole cells."""
     crs = true_crs(p)
     fwd = Transformer.from_crs(crs.geodetic_crs, crs, always_xy=True)
     inv = Transformer.from_crs(crs, crs.geodetic_crs, always_xy=True)
     xc, yc = fwd.transform(p["CEN_LON"], p["CEN_LAT"])
-    x0 = xc - (nx - 1) / 2 * dx
-    y0 = yc - (ny - 1) / 2 * dy
+    x0 = xc - (nx - 1) / 2 * dx + shift[0] * dx
+    y0 = yc - (ny - 1) / 2 * dy + shift[1] * dy
     jj, ii = np.mgrid[0:ny, 0:nx]
     lon, lat = inv.transform(x0 + ii * dx, y0 + jj * dy)
     lon = (np.asarray(lon) + 180.0) % 360.0 - 180.0
@@ -68,6 +70,7 @@ def write_wrfout(
     bucket_mm: float = -1.0,
     precip_rate: float = 1.0,
     corrupt_xtime: tuple[datetime, ...] = (),
+    move: tuple[int, int] = (0, 0),
 ) -> list[Path]:
     """Write wrfout_dNN_* files. Returns paths.
 
@@ -76,11 +79,15 @@ def write_wrfout(
       U (staggered) = i_stag, V (staggered) = j_stag at every level;
       RAINNC = precip_rate * hours since sim_start * (1 + i/nx);
       RAINC  = 0.5 * hours since sim_start.
+
+    ``move`` = (cols east, rows north) per output time makes a moving nest:
+    the k-th time is shifted by k * move cells, and the i in the patterns
+    above is the column of the *first* position's lattice, so every pattern
+    stays attached to the ground as the grid moves.
     """
     p = dict(PROJECTIONS[map_proj])
     sim_start = sim_start or times[0]
     start_date = start_date or sim_start
-    lon, lat, _, _ = grid_lonlat(p, nx, ny, dx, dx)
     directory.mkdir(parents=True, exist_ok=True)
     paths = []
     for k in range(0, len(times), times_per_file):
@@ -124,12 +131,14 @@ def write_wrfout(
                 fields[name].units = rain_units if name.startswith(("RAIN", "I_RAIN")) else (
                     "" if name.startswith("I_") else "m s-1")
             for n, t in enumerate(chunk):
+                kk = k + n
+                lon, lat, _, _ = grid_lonlat(p, nx, ny, dx, dx, (kk * move[0], kk * move[1]))
                 tv[n, :] = np.array(list(f"{t:%Y-%m-%d_%H:%M:%S}"), dtype="S1")
                 xt[n] = 0.0 if t in corrupt_xtime else (t - sim_start).total_seconds() / 60.0
                 v_lat[n] = lat
                 v_lon[n] = lon
                 hours = (t - sim_start).total_seconds() / 3600.0
-                ii = np.arange(nx)[None, :].repeat(ny, axis=0)
+                ii = np.arange(nx)[None, :].repeat(ny, axis=0) + kk * move[0]
                 if "U10" in fields:
                     fields["U10"][n] = 3.0 * (1.0 + ii / nx)
                 if "V10" in fields:
