@@ -2,7 +2,8 @@
 
 The map is drawn in the grid's own projection, so the field is placed with
 exactly the same CRS and affine transform as the GeoTIFF (no resampling and no
-lat/lon approximation). The extent always comes from the data's grid.
+lat/lon approximation). The extent always comes from the data's grid (for
+composites, the outermost grid; nested grids are placed on it exactly).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import cartopy.feature as cfeature  # noqa: E402
 import matplotlib.colors as mcolors  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-from pyproj import CRS  # noqa: E402
+from pyproj import CRS, Transformer  # noqa: E402
 
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
 from modelatlasify.core.variables import VariableDefinition  # noqa: E402
@@ -79,13 +80,30 @@ def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
     title: str, subtitle: str = "", dpi: int = 110,
 ) -> Path:
-    data = np.asarray(field.data, dtype=np.float64)
-    masked = np.ma.masked_invalid(data)
-    if variable.transparent_below is not None:
-        masked = np.ma.masked_less(masked, variable.transparent_below)
+    return _draw_map(path, [(field.data, grid)], variable, title, subtitle, dpi=dpi)
 
-    proj = cartopy_projection(grid.crs)
-    xmin, ymin, xmax, ymax = grid.native_bounds
+
+def plot_composite(
+    path: Path, base: tuple[np.ndarray, GridDefinition],
+    nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
+    title: str, subtitle: str = "", dpi: int = 110,
+) -> Path:
+    """Map of the base grid's whole area with nested grids drawn on top (finest
+    last) and their boundaries outlined in black. A nest with ``data=None`` is
+    drawn as an outline only."""
+    return _draw_map(path, [base, *nests], variable, title, subtitle,
+                     outlines=[g for _, g in nests], dpi=dpi)
+
+
+def _draw_map(
+    path: Path, layers: list[tuple[np.ndarray | None, GridDefinition]],
+    variable: VariableDefinition, title: str, subtitle: str = "",
+    outlines: list[GridDefinition] = (), dpi: int = 110,
+) -> Path:
+    """Draw ``layers`` (base grid first) over the base grid's extent."""
+    base_grid = layers[0][1]
+    proj = cartopy_projection(base_grid.crs)
+    xmin, ymin, xmax, ymax = base_grid.native_bounds
     aspect = (xmax - xmin) / (ymax - ymin)
     width_in = 11.0
     map_h = min(max(width_in / aspect, 3.0), 10.0)
@@ -94,12 +112,29 @@ def plot_field(
     ax.set_extent((xmin, xmax, ymin, ymax), crs=proj)
     ax.set_facecolor("#e9eef2")
 
-    norm, cmap = _norm_and_cmap(variable, data)
-    img = ax.imshow(
-        masked, origin="upper", extent=(xmin, xmax, ymin, ymax), transform=proj,
-        cmap=cmap, norm=norm, interpolation="nearest", zorder=1,
-    )
-    _add_geography(ax, extent_m=_grid_extent_m(grid))
+    drawn = [(np.asarray(d, dtype=np.float64), g) for d, g in layers if d is not None]
+    norm, cmap = _norm_and_cmap(variable, np.concatenate([d.ravel() for d, _ in drawn]))
+    img = None
+    for k, (data, grid) in enumerate(drawn):
+        masked = np.ma.masked_invalid(data)
+        if variable.transparent_below is not None:
+            masked = np.ma.masked_less(masked, variable.transparent_below)
+        # Hide this layer wherever a finer layer is drawn on top of it.
+        for _, finer in drawn[k + 1:]:
+            masked = np.ma.masked_where(_inside(grid, finer), masked)
+        style = dict(cmap=cmap, norm=norm, zorder=1 + 0.1 * k)
+        extent = _extent_in(grid, base_grid.crs)
+        if extent is not None:
+            artist = ax.imshow(masked, origin="upper", extent=extent, transform=proj,
+                               interpolation="nearest", **style)
+        else:  # not axis-aligned in the base CRS: place each cell exactly
+            xs, ys = _corners_in(grid, base_grid.crs)
+            artist = ax.pcolormesh(xs, ys, masked, transform=proj, shading="flat", **style)
+        img = img if img is not None else artist
+    _add_geography(ax, extent_m=_grid_extent_m(base_grid))
+    for grid in outlines:
+        bx, by = _boundary_in(grid, base_grid.crs)
+        ax.plot(bx, by, color="black", linewidth=1.2, transform=proj, zorder=3)
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
         gl.top_labels = False
@@ -126,6 +161,74 @@ def plot_field(
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
     return path
+
+
+# ------------------------------------------------- placing grids on another
+def _transformer(src: CRS, dst: CRS) -> Transformer | None:
+    return None if src == dst else Transformer.from_crs(src, dst, always_xy=True)
+
+
+def _apply(grid: GridDefinition, cols: np.ndarray, rows: np.ndarray):
+    """Pixel (col, row) -> CRS (x, y) via the grid's affine transform."""
+    t = grid.transform
+    return t.a * cols + t.b * rows + t.c, t.d * cols + t.e * rows + t.f
+
+
+def _corners_in(grid: GridDefinition, crs: CRS) -> tuple[np.ndarray, np.ndarray]:
+    """Pixel-corner coordinates of ``grid`` in ``crs``, shape (height+1, width+1)."""
+    rows, cols = np.mgrid[0:grid.height + 1, 0:grid.width + 1]
+    xs, ys = _apply(grid, cols, rows)
+    tr = _transformer(grid.crs, crs)
+    if tr is not None:
+        xs, ys = tr.transform(xs, ys)
+    return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
+
+
+def _extent_in(grid: GridDefinition, crs: CRS) -> tuple[float, float, float, float] | None:
+    """imshow extent (left, right, bottom, top) of ``grid`` in ``crs`` if the grid
+    stays a north-up, axis-aligned regular grid there (e.g. same CRS, or WRF
+    Mercator nests that differ only in central meridian); else None."""
+    if _transformer(grid.crs, crs) is None:
+        xmin, ymin, xmax, ymax = grid.native_bounds
+        return (xmin, xmax, ymin, ymax)
+    xs, ys = _corners_in(grid, crs)
+    if not (np.all(np.isfinite(xs)) and np.all(np.isfinite(ys))):
+        return None
+    t = grid.transform
+    tol = 1e-3 * min(abs(t.a), abs(t.e))
+    left, top = xs[0, 0], ys[0, 0]
+    dx = (xs[0, -1] - left) / grid.width
+    dy = (ys[-1, 0] - top) / grid.height
+    rows, cols = np.mgrid[0:grid.height + 1, 0:grid.width + 1]
+    if (dx <= 0 or dy >= 0 or np.abs(xs - (left + cols * dx)).max() > tol
+            or np.abs(ys - (top + rows * dy)).max() > tol):
+        return None
+    return (left, left + dx * grid.width, top + dy * grid.height, top)
+
+
+def _inside(grid: GridDefinition, other: GridDefinition) -> np.ndarray:
+    """Boolean (height, width): which pixel centres of ``grid`` lie within ``other``."""
+    rows, cols = np.mgrid[0:grid.height, 0:grid.width]
+    xs, ys = _apply(grid, cols + 0.5, rows + 0.5)
+    tr = _transformer(grid.crs, other.crs)
+    if tr is not None:
+        xs, ys = tr.transform(xs, ys)
+    xmin, ymin, xmax, ymax = other.native_bounds
+    return (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
+
+
+def _boundary_in(grid: GridDefinition, crs: CRS, n: int = 100) -> tuple[np.ndarray, np.ndarray]:
+    """Closed outer boundary of ``grid`` in ``crs``, densified to follow curvature."""
+    xmin, ymin, xmax, ymax = grid.native_bounds
+    s = np.linspace(0.0, 1.0, n, endpoint=False)
+    xs = np.concatenate([xmin + s * (xmax - xmin), np.full(n, xmax),
+                         xmax - s * (xmax - xmin), np.full(n, xmin), [xmin]])
+    ys = np.concatenate([np.full(n, ymin), ymin + s * (ymax - ymin),
+                         np.full(n, ymax), ymax - s * (ymax - ymin), [ymin]])
+    tr = _transformer(grid.crs, crs)
+    if tr is not None:
+        xs, ys = tr.transform(xs, ys)
+    return np.asarray(xs), np.asarray(ys)
 
 
 def _geography_features(extent_m: float) -> list:

@@ -2,6 +2,8 @@
 
 Valid times are processed independently (compute, GeoTIFF, map), optionally in
 a pool of worker processes; the STAC catalog is assembled in the main process.
+With plots on, each run then also gets composite maps (the outermost domain
+with its nests overlaid) under ``<run>/model-images/``, outside the catalog.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +43,7 @@ class PipelineOptions:
     plots: bool = True
     domains: list[str] | None = None  # e.g. ["d01"]; None = all
     processes: int = 1  # worker processes for the per-time work
+    image_prefix: str = "uwincm"  # file name prefix of the composite maps
 
 
 @dataclass
@@ -49,6 +53,7 @@ class PipelineResult:
     n_items: int
     n_geotiffs: int
     n_plots: int
+    n_composites: int
     skipped_files: list[tuple[Path, str]]
     quality_skips: list[str]
     seconds: float
@@ -109,12 +114,13 @@ def _init_worker(model: str, datasets: dict[tuple[str, str], ModelDataset], outp
         if name == "":
             logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
         logging.getLogger(name).setLevel(level)
-    plot_field = None
-    if plots:
-        from modelatlasify.plotting.maps import plot_field  # heavy import; only when needed
+    plot_field = plot_composite = None
+    if plots:  # heavy imports; only when needed
+        from modelatlasify.plotting.maps import plot_composite, plot_field
     _worker.clear()
     _worker.update(adapter=get_adapter(model), datasets=datasets,
-                   builder=CatalogBuilder(output), variables=variables, plot_field=plot_field)
+                   builder=CatalogBuilder(output), variables=variables, plot_field=plot_field,
+                   plot_composite=plot_composite)
 
 
 def _close_worker() -> None:
@@ -165,6 +171,75 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
     return res
 
 
+# ------------------------------------------------------ composite maps
+def composite_path(run_dir: Path, plot_area: str, variable: str, prefix: str,
+                   valid: datetime) -> Path:
+    """``<run>/model-images/<area>/<variable>/<prefix>.<area>.<variable>.<time>.png``"""
+    name = f"{prefix}.{plot_area}.{variable}.{valid:%Y%m%dT%H%M%SZ}.png"
+    return run_dir / "model-images" / plot_area / variable / name
+
+
+@dataclass
+class _CompositeTask:
+    """One composite map: the base domain's product plus its nests' (if any)."""
+
+    run_id: str
+    variable: str
+    path: Path
+    base: tuple[str, Path, FieldResult]  # (dataset_id, GeoTIFF, field metadata)
+    nests: list[tuple[str, Path | None]]  # (dataset_id, GeoTIFF or None = outline only)
+
+
+def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
+                     products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]],
+                     plot_area: str, prefix: str) -> list[_CompositeTask]:
+    """Composite maps of one run over the outermost domain's whole area.
+
+    ``products`` maps (dataset_id, valid time, variable) to the published
+    GeoTIFF. A nest is overlaid only when its product covers the same period as
+    the base's (e.g. not when a nest started accumulating later); otherwise, or
+    when it has no product at that time, only its outline is drawn.
+    """
+    base, *nests = sorted(datasets, key=lambda d: d.dataset_id)
+    tasks = []
+    for valid in base.valid_times:
+        for vname in variables:
+            if (base.dataset_id, valid, vname) not in products:
+                continue  # not defined or failed sanity checks
+            tif, meta = products[(base.dataset_id, valid, vname)]
+            overlays = []
+            for nest in nests:
+                p = products.get((nest.dataset_id, valid, vname))
+                same_period = p is not None and (p[1].start_time, p[1].end_time) == (
+                    meta.start_time, meta.end_time)
+                overlays.append((nest.dataset_id, p[0] if same_period else None))
+            tasks.append(_CompositeTask(
+                base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
+                (base.dataset_id, tif, meta), overlays))
+    return tasks
+
+
+def _read_tif(path: Path) -> np.ndarray:
+    import rasterio
+
+    with rasterio.open(path) as src:
+        return src.read(1)
+
+
+def _plot_composite(task: _CompositeTask) -> Path:
+    datasets = _worker["datasets"]
+    base_id, base_tif, meta = task.base
+    base_ds: ModelDataset = datasets[(task.run_id, base_id)]
+    var = get_variable(task.variable)
+    nests = [(None if tif is None else _read_tif(tif), datasets[(task.run_id, nid)].grid)
+             for nid, tif in task.nests]
+    title, subtitle = _titles(base_ds, meta, var.long_name, var.units)
+    overlaid = [nid for nid, tif in task.nests if tif is not None]
+    subtitle += "".join(f" + {nid}" for nid in overlaid)
+    return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid), nests,
+                                     var, title, subtitle)
+
+
 def _log_levels() -> dict[str, int]:
     names = ("", "modelatlasify", "modelatlasify.models")
     return {n: logging.getLogger(n).level for n in names}
@@ -211,15 +286,19 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
             pool = multiprocessing.get_context("spawn").Pool(
                 processes, initializer=_init_worker, initargs=init_args)
             mapper = lambda tasks: pool.imap(_process_time, tasks, chunksize=1)  # noqa: E731
+            mapper_composite = lambda tasks: pool.imap(  # noqa: E731
+                _plot_composite, tasks, chunksize=1)
         else:
             _init_worker(*init_args)
             mapper = lambda tasks: map(_process_time, tasks)  # noqa: E731
+            mapper_composite = lambda tasks: map(_plot_composite, tasks)  # noqa: E731
 
         builder = CatalogBuilder(options.output)
-        n_items = n_tif = n_png = 0
+        n_items = n_tif = n_png = n_comp = 0
         quality_skips: list[str] = []
         for run_id, datasets in runs.items():
             items = []
+            products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]] = {}
             for ds in datasets:
                 tasks = [(run_id, ds.dataset_id, ti) for ti in range(len(ds.valid_times))]
                 results = tqdm(mapper(tasks), total=len(tasks), desc=f"{run_id} {ds.dataset_id}",
@@ -234,6 +313,17 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                     n_tif += res.n_tif
                     n_png += res.n_png
                     quality_skips.extend(res.quality_skips)
+                    for a in res.assets:
+                        if a.kind == "data":
+                            products[(ds.dataset_id, ds.valid_times[ti], a.variable)] = (
+                                a.path, a.field)
+            if options.plots:
+                tasks = _composite_tasks(builder.run_dir(run_id), datasets, options.variables,
+                                         products, "full", options.image_prefix)
+                for _ in tqdm(mapper_composite(tasks), total=len(tasks),
+                              desc=f"{run_id} composite maps", unit="map", file=sys.stderr,
+                              disable=not progress):
+                    n_comp += 1
             builder.add_run(run_id, datasets, items, options.variables)
         catalog_path = builder.save()
     finally:
@@ -247,7 +337,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
     return PipelineResult(
         catalog_path=catalog_path,
         datasets=[d for ds in runs.values() for d in ds],
-        n_items=n_items, n_geotiffs=n_tif, n_plots=n_png,
+        n_items=n_items, n_geotiffs=n_tif, n_plots=n_png, n_composites=n_comp,
         skipped_files=skipped, quality_skips=quality_skips, seconds=time.monotonic() - t0,
     )
 

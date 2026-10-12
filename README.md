@@ -65,7 +65,7 @@ Variables: surface_wind_speed, precipitation, precipitation_interval (8 processe
 Found WRF run 'run01' in /data/wrf/run01:
   d01: 25 file(s), 25 time(s) 2026-10-06 00:00 -> 2026-10-07 00:00 UTC, 1649x699 grid, georeference fit error 2.4 m.
 run01 d01: 100%|██████████████████████████████| 25/25 [00:06<00:00,  3.9time/s]
-Generated 25 STAC items, 74 GeoTIFFs, 74 maps in 31 s.
+Generated 25 STAC items, 74 GeoTIFFs, 74 maps, 74 composite maps in 31 s.
 Checking catalog links and validating STAC schemas...
 STAC validation passed for 27 objects; all asset links resolve.
 /home/me/atlas/catalog.json
@@ -78,6 +78,12 @@ atlas/
 ├── catalog.json                              # STAC Catalog (root)
 └── run01/                                    # one directory per model run
     ├── collection.json                       # STAC Collection: the run
+    ├── model-images/                         # composite maps (not in the STAC catalog)
+    │   └── full/                             # plot area: the whole outermost domain
+    │       ├── precipitation/
+    │       │   └── uwincm.full.precipitation.20261006T010000Z.png
+    │       ├── precipitation_interval/
+    │       └── surface_wind_speed/
     └── items/
         ├── d01-20261006T000000Z/
         │   ├── d01-20261006T000000Z.json     # STAC Item: domain d01 @ valid time
@@ -91,6 +97,13 @@ atlas/
             ├── precipitation.tif / .png
             └── precipitation_interval.tif / .png
 ```
+
+Besides the per-domain map of each STAC item, `model-images/` holds one
+composite map per valid time and variable: the outermost domain (d01) with any
+nested domains (d02, d03, ...) drawn on top at their own resolution and outlined
+in black. A nest is overlaid only when its product covers the same period as
+d01's (e.g. not when it started accumulating precipitation later). Otherwise
+only its outline is drawn.
 
 The catalog is *self-contained*: all links are relative, so you can move or
 upload the whole `atlas/` directory as is.
@@ -109,7 +122,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitat
 | `--variables` | `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), or exact names such as `precipitation_interval`. |
 | `--domains` | Only process these WRF domains. |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
-| `--no-plots` | Skip PNG maps (much faster for large domains). |
+| `--no-plots` | Skip PNG maps, including the composite maps (much faster for large domains). |
 | `--no-validate` | Skip STAC JSON-schema validation, which downloads schemas. Asset links are always checked. |
 
 Exit status: `0` on success, `1` on errors (no usable data, a missing input

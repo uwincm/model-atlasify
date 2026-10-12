@@ -8,6 +8,9 @@ valid time)::
     <output>/<run_id>/items/<item_id>/<item_id>.json        Item (domain @ valid time)
     <output>/<run_id>/items/<item_id>/<variable>.tif|.png   Assets
 
+Composite maps (all domains of a run on one map) are written alongside, under
+``<output>/<run_id>/model-images/``, and are not part of the catalog.
+
 The catalog is saved "self-contained": every link and asset href is relative,
 so the whole tree can be moved or uploaded (e.g. to object storage) intact.
 """

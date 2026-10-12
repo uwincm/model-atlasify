@@ -98,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
         if len(result.quality_skips) > 10:
             _status(f"  ... and {len(result.quality_skips) - 10} more")
     _status(f"Generated {result.n_items} STAC items, {result.n_geotiffs} GeoTIFFs, "
-            f"{result.n_plots} maps in {result.seconds:.0f} s.")
+            f"{result.n_plots} maps, {result.n_composites} composite maps "
+            f"in {result.seconds:.0f} s.")
     _status("Checking catalog links" + (" and validating STAC schemas..." if args.validate else "..."))
     report = validate_catalog(result.catalog_path, schemas=args.validate)
     if report.missing_hrefs:
