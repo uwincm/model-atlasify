@@ -1,6 +1,6 @@
 import pytest
 
-from conftest import T0
+from conftest import T0, run_out
 from wrf_fixture import hourly, write_wrfout
 from modelatlasify.cli import main
 from modelatlasify.core.validation import validate_catalog
@@ -13,10 +13,10 @@ def test_composite_maps_with_nest(tmp_path):
     out = tmp_path / "atlas"
     assert main([str(run), "-o", str(out), "--no-validate"]) == 0
 
-    images = out / "run01" / "model-images" / "full"
+    images = run_out(out, run) / "model-images" / "full"
     pngs = {p.relative_to(images).as_posix() for p in images.rglob("*.png")}
     assert "precipitation/uwincm.full.precipitation.20261006T010000Z.png" in pngs
-    d01_tifs = list(out.glob("run01/items/d01-*/*.tif"))
+    d01_tifs = list(run_out(out, run).glob("items/d01-*/*.tif"))
     assert len(pngs) == len(d01_tifs) == 3 + 3 + 2
     for p in pngs:
         var, name = p.split("/")
@@ -43,7 +43,7 @@ def test_sub_area_maps(tmp_path, capsys):
     out = tmp_path / "atlas"
     assert main([str(run), "-o", str(out), "--no-validate", "--variables", "wind",
                  "--plot-sub-areas=zoom,-101,-99,39.5,40.5,away,10,20,40,50"]) == 0
-    images = out / "run01" / "model-images"
+    images = run_out(out, run) / "model-images"
     zoom = sorted(p.name for p in images.glob("zoom/surface_wind_speed/*.png"))
     assert zoom == ["uwincm.zoom.surface_wind_speed.20261006T000000Z.png",
                     "uwincm.zoom.surface_wind_speed.20261006T010000Z.png"]
@@ -79,7 +79,7 @@ def test_no_full_plots_keeps_sub_areas_and_item_maps(tmp_path):
     out = tmp_path / "atlas"
     assert main([str(run), "-o", str(out), "--no-validate", "--variables", "wind",
                  "--no-full-plots", "--plot-sub-areas=zoom,-101,-99,39.5,40.5"]) == 0
-    images = out / "run01" / "model-images"
+    images = run_out(out, run) / "model-images"
     assert not (images / "full").exists()
     assert len(list(images.glob("zoom/surface_wind_speed/*.png"))) == 2
-    assert len(list(out.glob("run01/items/*/surface_wind_speed.png"))) == 2
+    assert len(list(run_out(out, run).glob("items/*/surface_wind_speed.png"))) == 2

@@ -11,12 +11,14 @@ from __future__ import annotations
 import dataclasses
 import logging
 import multiprocessing
+import os
+import re
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 from tqdm import tqdm
@@ -45,6 +47,7 @@ class PipelineOptions:
     domains: list[str] | None = None  # e.g. ["d01"]; None = all
     processes: int = 1  # worker processes for the per-time work
     image_prefix: str = "uwincm"  # file name prefix of the composite maps
+    cut_dirs: int = 0  # leading input-path directories dropped from the output folder
     sub_areas: list[SubArea] = field(default_factory=list)  # zoomed composites, in lon/lat
     full_plots: bool = True  # whole-domain composites (model-images/full/)
 
@@ -62,26 +65,44 @@ class PipelineResult:
     seconds: float
 
 
+def run_location(directory: Path, cut_dirs: int = 0) -> tuple[PurePosixPath, str, bool]:
+    """Where a run goes under the output directory, and its id.
+
+    The run folder mirrors the input directory's absolute path (``..`` is
+    normalised; symlinks are kept as typed), minus its first ``cut_dirs``
+    directories, like wget's --cut-dirs. Cutting everything keeps just the
+    run directory's own name (the third value is then True, for a warning).
+    The id is the folder's path with "/" replaced by "--", restricted to
+    characters that are safe in STAC ids and URLs.
+    """
+    parts = Path(os.path.abspath(directory)).parts[1:]
+    over_cut = cut_dirs >= len(parts)
+    kept = parts[-1:] if over_cut else parts[cut_dirs:]
+    run_id = "--".join(re.sub(r"[^A-Za-z0-9_.-]+", "-", p).strip("-") or "x" for p in kept)
+    return PurePosixPath(*kept), run_id, over_cut
+
+
 def discover(adapter: ModelAdapter, inputs: list[Path], domains: list[str] | None,
-             report: Callable[[str], None]) -> dict[str, list[ModelDataset]]:
-    """Discover datasets in every input directory, grouped by (unique) run id."""
+             report: Callable[[str], None], cut_dirs: int = 0) -> dict[str, list[ModelDataset]]:
+    """Discover datasets in every input directory, grouped by run id."""
     runs: dict[str, list[ModelDataset]] = {}
     for directory in inputs:
+        run_path, run_id, over_cut = run_location(directory, cut_dirs)
+        if run_id in runs:
+            report(f"WARNING: {directory} is listed more than once; processing it once.")
+            continue
+        if over_cut:
+            report(f"WARNING: --cut-dirs={cut_dirs} removes all parent directories of "
+                   f"{os.path.abspath(directory)}; using '{run_path}' only.")
         found = adapter.discover(directory)
         if domains:
             found = [d for d in found if d.dataset_id.split("-")[0] in domains]
             if not found:
                 raise DiscoveryError(f"No output for domain(s) {', '.join(domains)} in {directory}")
-        run_id = found[0].run_id
-        if run_id in runs:  # two inputs with the same directory name
-            n = 2
-            while f"{run_id}-{n}" in runs:
-                n += 1
-            for d in found:
-                d.run_id = f"{run_id}-{n}"
-            run_id = f"{run_id}-{n}"
+        for d in found:
+            d.run_id, d.run_path = run_id, run_path.as_posix()
         runs[run_id] = found
-        report(f"Found {adapter.name} run '{run_id}' in {directory}:")
+        report(f"Found {adapter.name} run '{run_path}' in {directory}:")
         for d in found:
             g = d.grid
             report(
@@ -296,7 +317,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
 
     pool = None
     try:
-        runs = discover(adapter, options.inputs, options.domains, report)
+        runs = discover(adapter, options.inputs, options.domains, report, options.cut_dirs)
         skipped = list(getattr(adapter, "skipped_files", []))
         if skipped:
             report(f"WARNING: skipped {len(skipped)} unusable file(s), e.g. "
@@ -338,7 +359,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
             products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]] = {}
             for ds in datasets:
                 tasks = [(run_id, ds.dataset_id, ti) for ti in range(len(ds.valid_times))]
-                results = tqdm(mapper(tasks), total=len(tasks), desc=f"{run_id} {ds.dataset_id}",
+                results = tqdm(mapper(tasks), total=len(tasks), desc=f"{ds.run_name} {ds.dataset_id}",
                                unit="time", file=sys.stderr, disable=not progress)
                 for res in results:
                     ti = res.time_index
@@ -359,13 +380,13 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                 for area in ([None] if options.full_plots else []) + options.sub_areas:
                     if area is not None and not _area_in_run(area, datasets):
                         report(f"WARNING: sub-area '{area.name}' is entirely outside run "
-                               f"'{run_id}'; no maps made for it.")
+                               f"'{datasets[0].run_path}'; no maps made for it.")
                         continue
-                    tasks += _composite_tasks(builder.run_dir(run_id), datasets,
+                    tasks += _composite_tasks(builder.run_dir(datasets[0]), datasets,
                                               options.variables, products, area,
                                               options.image_prefix)
                 for _ in tqdm(mapper_composite(tasks), total=len(tasks),
-                              desc=f"{run_id} composite maps", unit="map", file=sys.stderr,
+                              desc=f"{datasets[0].run_name} composite maps", unit="map", file=sys.stderr,
                               disable=not progress):
                     n_comp += 1
             builder.add_run(run_id, datasets, items, options.variables)
@@ -419,5 +440,5 @@ def _titles(ds: ModelDataset, fld: FieldResult, long_name: str, units: str) -> t
     if ds.reference_time:
         lead = (valid - ds.reference_time).total_seconds() / 3600.0
         sub += f"  |  init {ds.reference_time:%Y-%m-%d %H:%M} UTC (+{lead:g} h)"
-    sub += f"  |  {ds.model} run {ds.run_id}, {ds.dataset_id}"
+    sub += f"  |  {ds.model} run {ds.run_name}, {ds.dataset_id}"
     return title, sub

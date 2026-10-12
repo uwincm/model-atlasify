@@ -3,13 +3,16 @@
 Structure (one Collection per model run, one Item per dataset/domain and
 valid time)::
 
-    <output>/catalog.json                                   Catalog
-    <output>/<run_id>/collection.json                       Collection (the run)
-    <output>/<run_id>/items/<item_id>/<item_id>.json        Item (domain @ valid time)
-    <output>/<run_id>/items/<item_id>/<variable>.tif|.png   Assets
+    <output>/catalog.json                                     Catalog
+    <output>/<run_path>/collection.json                       Collection (the run)
+    <output>/<run_path>/items/<item_id>/<item_id>.json        Item (domain @ valid time)
+    <output>/<run_path>/items/<item_id>/<variable>.tif|.png   Assets
 
-Composite maps (all domains of a run on one map) are written alongside, under
-``<output>/<run_id>/model-images/``, and are not part of the catalog.
+``<run_path>`` mirrors the input directory's path (optionally with leading
+directories cut), e.g. ``home/me/wrf/run01``; the Collection id is that path
+joined with "--" (``home--me--wrf--run01``). Composite maps (all domains of
+a run on one map) are written alongside, under ``<output>/<run_path>/model-images/``,
+and are not part of the catalog.
 
 The catalog is saved "self-contained": every link and asset href is relative,
 so the whole tree can be moved or uploaded (e.g. to object storage) intact.
@@ -126,11 +129,11 @@ class CatalogBuilder:
         )
         self._footprints: dict[tuple, Footprint] = {}
 
-    def run_dir(self, run_id: str) -> Path:
-        return self.output_dir / run_id
+    def run_dir(self, dataset: ModelDataset) -> Path:
+        return self.output_dir / (dataset.run_path or dataset.run_id)
 
     def item_dir(self, dataset: ModelDataset, valid_time: datetime) -> Path:
-        return self.run_dir(dataset.run_id) / "items" / item_id(dataset, valid_time)
+        return self.run_dir(dataset) / "items" / item_id(dataset, valid_time)
 
     def footprint(self, dataset: ModelDataset, time_index: int = 0) -> Footprint:
         """Footprint of the dataset's grid at a valid time (moving nests move)."""
@@ -155,7 +158,7 @@ class CatalogBuilder:
         fp = self.footprint(ds, rec.time_index)
         valid = rec.valid_time
         props: dict[str, Any] = {
-            "title": f"{ds.model} {ds.run_id} {ds.dataset_id} valid {valid:%Y-%m-%d %H:%M} UTC",
+            "title": f"{ds.model} {ds.run_name} {ds.dataset_id} valid {valid:%Y-%m-%d %H:%M} UTC",
             "modelatlasify:model": ds.model,
             "modelatlasify:run_id": ds.run_id,
             "modelatlasify:dataset": ds.dataset_id,
@@ -263,6 +266,7 @@ class CatalogBuilder:
             "modelatlasify:model": model,
             "modelatlasify:version": __version__,
             "modelatlasify:domains": domains,
+            "modelatlasify:run_path": parent.run_path or run_id,
             **shared,
         }
         if parent.source_dir is not None:
@@ -270,7 +274,8 @@ class CatalogBuilder:
 
         version = shared.get("wrf:version")
         desc = (
-            f"Output of {model}{' v' + version if version else ''} run '{run_id}': "
+            f"Output of {model}{' v' + version if version else ''} run "
+            f"'{parent.run_path or run_id}': "
             f"{len(datasets)} domain(s) ({', '.join(d.dataset_id for d in datasets)}), "
             f"{len(times)} domain-times from {times[0]:%Y-%m-%d %H:%M} to "
             f"{times[-1]:%Y-%m-%d %H:%M} UTC"
@@ -280,7 +285,7 @@ class CatalogBuilder:
         )
         collection = pystac.Collection(
             id=run_id,
-            title=f"{model} run {run_id}",
+            title=f"{model} run {parent.run_name}",
             description=desc,
             extent=pystac.Extent(
                 pystac.SpatialExtent(bboxes),
@@ -293,7 +298,7 @@ class CatalogBuilder:
             summaries=pystac.Summaries({"modelatlasify:dataset": [d.dataset_id for d in datasets]}),
         )
         collection.item_assets = self._item_assets(variables)
-        collection.set_self_href(str(self.run_dir(run_id) / "collection.json"))
+        collection.set_self_href(str(self.run_dir(parent) / "collection.json"))
         for it in items:
             href = it.get_self_href()
             collection.add_item(it)

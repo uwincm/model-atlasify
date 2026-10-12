@@ -68,7 +68,7 @@ pixi run modelatlasify /data/wrf/run01 --output ./atlas -np 8
 ```text
 ModelAtlasify 0.1.0: WRF -> /home/me/atlas
 Variables: surface_wind_speed, precipitation, precipitation_interval (8 processes)
-Found WRF run 'run01' in /data/wrf/run01:
+Found WRF run 'data/wrf/run01' in /data/wrf/run01:
   d01: 25 file(s), 25 time(s) 2026-10-06 00:00 -> 2026-10-07 00:00 UTC, 1649x699 grid, georeference fit error 2.4 m.
 run01 d01: 100%|██████████████████████████████| 25/25 [00:06<00:00,  3.9time/s]
 Generated 25 STAC items, 74 GeoTIFFs, 74 maps, 74 composite maps in 31 s.
@@ -77,12 +77,13 @@ STAC validation passed for 27 objects; all asset links resolve.
 /home/me/atlas/catalog.json
 ```
 
-Resulting layout:
+Resulting layout. Each run's output goes under the output directory at its input
+directory's full path, here `data/wrf/run01/`; `--cut-dirs` shortens that:
 
 ```text
 atlas/
 ├── catalog.json                              # STAC Catalog (root)
-└── run01/                                    # one directory per model run
+└── data/wrf/run01/                           # one directory per model run (mirrors the input path)
     ├── collection.json                       # STAC Collection: the run
     ├── command-used.20261012T153045Z.txt     # the exact command, one file per invocation
     ├── model-images/                         # composite maps (not in the STAC catalog)
@@ -134,7 +135,7 @@ upload the whole `atlas/` directory as is.
 
 ```text
 modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitation]
-              [--domains d01,d02] [-np N] [--no-plots] [--no-validate] [-v]
+              [--domains d01,d02] [--cut-dirs N] [-np N] [--no-plots] [--no-validate] [-v]
               [--plot-sub-areas NAME,LON1,LON2,LAT1,LAT2[,NAME,...]] [--no-full-plots]
 ```
 
@@ -144,6 +145,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitat
 | `-o, --output` | Output directory (default `./atlas`). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--variables` | `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), or exact names such as `precipitation_interval`. |
 | `--domains` | Only process these WRF domains. |
+| `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01`. |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
 | `--no-plots` | Skip PNG maps, including the composite maps (much faster for large domains). |
 | `--plot-sub-areas` | Extra composite maps of lon/lat boxes, as groups of five values: `NAME,LON1,LON2,LAT1,LAT2`. Names may use letters, digits, `_` and `-`; `full` is reserved. Longitudes may be in -180..180 or 0..360. The box runs east from LON1 to LON2, so LON2 < LON1 crosses the antimeridian. Ignored with `--no-plots`. |

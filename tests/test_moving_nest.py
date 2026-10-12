@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import rasterio
 
-from conftest import T0
+from conftest import T0, run_out
 from wrf_fixture import hourly, write_wrfout
 from modelatlasify.cli import main
 from modelatlasify.models.wrf.adapter import WRFAdapter
@@ -51,7 +51,8 @@ def test_outer_domain_still_rejects_a_shifted_file(tmp_path):
 def test_products_follow_the_nest(moving_run, tmp_path):
     out = tmp_path / "atlas"
     assert main([str(moving_run), "-o", str(out), "--no-validate"]) == 0
-    items = sorted((out / "run01" / "items").glob("d02-*"))
+    run_dir = run_out(out, moving_run)
+    items = sorted((run_dir / "items").glob("d02-*"))
     assert len(items) == 4
     origins, bboxes = [], []
     for k, item_dir in enumerate(items):
@@ -65,7 +66,7 @@ def test_products_follow_the_nest(moving_run, tmp_path):
         np.testing.assert_allclose(wind[0], 5 * (1 + (np.arange(20) + k * MOVE[0]) / 20), rtol=1e-5)
     assert len(set(origins)) == 4 and bboxes[0] != bboxes[-1]
 
-    collection = json.loads((out / "run01" / "collection.json").read_text())
+    collection = json.loads((run_dir / "collection.json").read_text())
     (d02,) = [d for d in collection["modelatlasify:domains"] if d["id"] == "d02"]
     assert d02["moving"] and d02["n_positions"] == 4
     assert d02["bbox"][0] <= min(b[0] for b in bboxes) and d02["bbox"][2] >= max(b[2] for b in bboxes)
@@ -81,8 +82,8 @@ def test_products_follow_the_nest(moving_run, tmp_path):
     assert np.isnan(amount[-1, :]).all()  # nest moved south by one row: bottom row is new
     assert np.isnan(amount[:, -MOVE[0]:]).all()  # and east by two columns
 
-    images = list((out / "run01" / "model-images" / "full").rglob("*.png"))
-    assert len(images) == len(list(out.glob("run01/items/d01-*/*.tif")))
+    images = list((run_dir / "model-images" / "full").rglob("*.png"))
+    assert len(images) == len(list(run_dir.glob("items/d01-*/*.tif")))
 
 
 def test_composite_task_uses_the_nest_position_at_each_time(moving_run):

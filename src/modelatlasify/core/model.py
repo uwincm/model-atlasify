@@ -108,11 +108,20 @@ class ModelDataset:
     source_dir: Path | None = None
     #: The file holding each valid time (parallel to ``valid_times``).
     time_sources: list[Path] = field(default_factory=list)
+    #: The run's folder under the output directory (POSIX, relative), set by
+    #: the pipeline from the input path; ``run_id`` is the same path joined
+    #: with "--".
+    run_path: str = ""
     #: Grid at each valid time (parallel to ``valid_times``) for moving
     #: domains; None when the grid is fixed.
     time_grids: list[GridDefinition] | None = field(default=None, repr=False)
     #: Opaque, adapter-private bookkeeping (e.g. which file/index holds each time).
     adapter_state: Any = field(default=None, repr=False)
+
+    @property
+    def run_name(self) -> str:
+        """Short, human-readable run name: the run directory's own name."""
+        return self.run_path.rsplit("/", 1)[-1] if self.run_path else self.run_id
 
     @property
     def moving(self) -> bool:

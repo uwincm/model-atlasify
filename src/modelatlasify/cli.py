@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="comma-separated variables to generate (default: wind,precipitation)")
     p.add_argument("--domains", default=None,
                    help="comma-separated domains to process, e.g. d01 (default: all)")
+    p.add_argument("--cut-dirs", type=int, default=0, metavar="N",
+                   help="output for INPUT_DIR goes under OUTPUT/<absolute path of INPUT_DIR>; "
+                        "drop its first N directories, like wget --cut-dirs (default: 0). "
+                        "A large N (e.g. 99) keeps only the run directory's own name")
     p.add_argument("-np", "--processes", type=int, default=1, metavar="N",
                    help="number of worker processes for per-time processing (default: 1)")
     p.add_argument("--no-plots", dest="plots", action="store_false",
@@ -87,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.processes < 1:
         parser.error("-np/--processes must be at least 1")
+    if args.cut_dirs < 0:
+        parser.error("--cut-dirs must be 0 or more")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(levelname)s: %(message)s",
@@ -114,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     options = PipelineOptions(
         inputs=args.inputs, output=args.output, model=args.model, variables=variables,
         plots=args.plots, domains=domains, processes=args.processes, sub_areas=sub_areas,
-        full_plots=args.full_plots,
+        full_plots=args.full_plots, cut_dirs=args.cut_dirs,
     )
     _status(f"ModelAtlasify {__version__}: {args.model.upper()} -> {args.output.resolve()}")
     _status(f"Variables: {', '.join(variables)}"
@@ -138,8 +144,8 @@ def main(argv: list[str] | None = None) -> int:
     _status(f"Generated {result.n_items} STAC items, {result.n_geotiffs} GeoTIFFs, "
             f"{result.n_plots} maps, {result.n_composites} composite maps "
             f"in {result.seconds:.0f} s.")
-    for run_id in dict.fromkeys(d.run_id for d in result.datasets):
-        write_command_record(result.catalog_path.parent / run_id, argv, started)
+    for run_path in dict.fromkeys(d.run_path for d in result.datasets):
+        write_command_record(result.catalog_path.parent / run_path, argv, started)
     _status("Checking catalog links" + (" and validating STAC schemas..." if args.validate else "..."))
     report = validate_catalog(result.catalog_path, schemas=args.validate)
     if report.missing_hrefs:

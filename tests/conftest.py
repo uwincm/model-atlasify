@@ -13,6 +13,13 @@ from wrf_fixture import hourly, write_wrfout  # noqa: E402
 T0 = datetime(2026, 10, 6, 0, tzinfo=timezone.utc)
 
 
+def run_out(out: Path, run_dir: Path, cut_dirs: int = 0) -> Path:
+    """Where the output for input directory ``run_dir`` goes under ``out``."""
+    from modelatlasify.core.processing import run_location
+
+    return out / run_location(run_dir, cut_dirs)[0]
+
+
 @pytest.fixture
 def wrf_run(tmp_path) -> Path:
     """A 3-hour, single-domain Lambert-conformal run, one time per file."""

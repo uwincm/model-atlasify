@@ -16,11 +16,12 @@ def atlas(wrf_run, tmp_path) -> Path:
     return out
 
 
-def test_catalog_structure(atlas):
+def test_catalog_structure(atlas, wrf_run):
     cat = pystac.Catalog.from_file(str(atlas / "catalog.json"))
     (col,) = list(cat.get_children())
     assert isinstance(col, pystac.Collection)
-    assert col.id == "run01"
+    assert col.id == "--".join(wrf_run.parts[1:])
+    assert col.title == "WRF run run01"
     assert "WRF v4.5.1" in col.description
     assert col.extra_fields["modelatlasify:model"] == "WRF"
     assert col.extra_fields["wrf:map_proj"] == 1
@@ -47,7 +48,7 @@ def test_catalog_structure(atlas):
 
 
 def test_hrefs_are_relative_and_resolve(atlas):
-    item_json = next(atlas.glob("run01/items/*/d01-*.json"))
+    item_json = next(atlas.rglob("items/*/d01-*.json"))
     raw = json.loads(item_json.read_text())
     assert all(not a["href"].startswith("/") for a in raw["assets"].values())
     n, missing = check_links(atlas / "catalog.json")
@@ -94,8 +95,10 @@ def test_catalog_keeps_runs_from_earlier_invocations(tmp_path):
     for name in ("runA", "runB"):
         write_wrfout(tmp_path / name, hourly(T0, 2))
     out = tmp_path / "atlas"
+    cut = len(tmp_path.parts) - 1  # keep just runA/, runB/
     run = lambda name: run_pipeline(  # noqa: E731
-        PipelineOptions(inputs=[tmp_path / name], output=out, plots=False), report=lambda m: None)
+        PipelineOptions(inputs=[tmp_path / name], output=out, plots=False, cut_dirs=cut),
+        report=lambda m: None)
 
     run("runA")
     run("runB")
