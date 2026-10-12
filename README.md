@@ -135,7 +135,7 @@ upload the whole `atlas/` directory as is.
 ```text
 modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitation]
               [--domains d01,d02] [-np N] [--no-plots] [--no-validate] [-v]
-              [--plot-sub-areas NAME,LON1,LON2,LAT1,LAT2[,NAME,...]]
+              [--plot-sub-areas NAME,LON1,LON2,LAT1,LAT2[,NAME,...]] [--no-full-plots]
 ```
 
 | option | meaning |
@@ -147,6 +147,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitat
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
 | `--no-plots` | Skip PNG maps, including the composite maps (much faster for large domains). |
 | `--plot-sub-areas` | Extra composite maps of lon/lat boxes, as groups of five values: `NAME,LON1,LON2,LAT1,LAT2`. Names may use letters, digits, `_` and `-`; `full` is reserved. Longitudes may be in -180..180 or 0..360. The box runs east from LON1 to LON2, so LON2 < LON1 crosses the antimeridian. Ignored with `--no-plots`. |
+| `--no-full-plots` | Skip the whole-domain composite maps (`model-images/full/`). The per-item maps in `items/` and any `--plot-sub-areas` maps are still made. |
 | `--no-validate` | Skip STAC JSON-schema validation, which downloads schemas. Asset links are always checked. |
 
 Exit status: `0` on success, `1` on errors (no usable data, a missing input

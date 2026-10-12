@@ -51,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="number of worker processes for per-time processing (default: 1)")
     p.add_argument("--no-plots", dest="plots", action="store_false",
                    help="skip PNG map generation")
+    p.add_argument("--no-full-plots", dest="full_plots", action="store_false",
+                   help="skip the whole-domain composite maps (model-images/full/); per-item "
+                        "maps and --plot-sub-areas maps are still made")
     p.add_argument("--plot-sub-areas", default=None, metavar="NAME,LON1,LON2,LAT1,LAT2[,...]",
                    help="extra composite maps of lon/lat boxes, drawn in PlateCarree under "
                         "model-images/NAME/, e.g. --plot-sub-areas=gulf,-98,-82,18,31. "
@@ -111,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     options = PipelineOptions(
         inputs=args.inputs, output=args.output, model=args.model, variables=variables,
         plots=args.plots, domains=domains, processes=args.processes, sub_areas=sub_areas,
+        full_plots=args.full_plots,
     )
     _status(f"ModelAtlasify {__version__}: {args.model.upper()} -> {args.output.resolve()}")
     _status(f"Variables: {', '.join(variables)}"

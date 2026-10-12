@@ -71,3 +71,15 @@ def test_crop_window_and_overlap():
     # A box much smaller than one cell still finds that cell.
     tiny = subarea_view(SubArea("t", -100.01, -100.0, 40.0, 40.01))
     assert view_overlaps(tiny, grid)
+
+
+def test_no_full_plots_keeps_sub_areas_and_item_maps(tmp_path):
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 2))
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--no-validate", "--variables", "wind",
+                 "--no-full-plots", "--plot-sub-areas=zoom,-101,-99,39.5,40.5"]) == 0
+    images = out / "run01" / "model-images"
+    assert not (images / "full").exists()
+    assert len(list(images.glob("zoom/surface_wind_speed/*.png"))) == 2
+    assert len(list(out.glob("run01/items/*/surface_wind_speed.png"))) == 2

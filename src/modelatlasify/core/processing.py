@@ -46,6 +46,7 @@ class PipelineOptions:
     processes: int = 1  # worker processes for the per-time work
     image_prefix: str = "uwincm"  # file name prefix of the composite maps
     sub_areas: list[SubArea] = field(default_factory=list)  # zoomed composites, in lon/lat
+    full_plots: bool = True  # whole-domain composites (model-images/full/)
 
 
 @dataclass
@@ -355,7 +356,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                                 a.path, a.field)
             if options.plots:
                 tasks = []
-                for area in [None, *options.sub_areas]:
+                for area in ([None] if options.full_plots else []) + options.sub_areas:
                     if area is not None and not _area_in_run(area, datasets):
                         report(f"WARNING: sub-area '{area.name}' is entirely outside run "
                                f"'{run_id}'; no maps made for it.")
