@@ -84,12 +84,15 @@ atlas/
 ├── catalog.json                              # STAC Catalog (root)
 └── run01/                                    # one directory per model run
     ├── collection.json                       # STAC Collection: the run
+    ├── command-used.20261012T153045Z.txt     # the exact command, one file per invocation
     ├── model-images/                         # composite maps (not in the STAC catalog)
-    │   └── full/                             # plot area: the whole outermost domain
-    │       ├── precipitation/
-    │       │   └── uwincm.full.precipitation.20261006T010000Z.png
-    │       ├── precipitation_interval/
-    │       └── surface_wind_speed/
+    │   ├── full/                             # plot area: the whole outermost domain
+    │   │   ├── precipitation/
+    │   │   │   └── uwincm.full.precipitation.20261006T010000Z.png
+    │   │   ├── precipitation_interval/
+    │   │   └── surface_wind_speed/
+    │   └── gulf/                             # a --plot-sub-areas area (lon/lat map)
+    │       └── precipitation/ ...            #   uwincm.gulf.precipitation.<time>.png
     └── items/
         ├── d01-20261006T000000Z/
         │   ├── d01-20261006T000000Z.json     # STAC Item: domain d01 @ valid time
@@ -111,6 +114,19 @@ in black. A nest is overlaid only when its product covers the same period as
 d01's (e.g. not when it started accumulating precipitation later). Otherwise
 only its outline is drawn.
 
+With `--plot-sub-areas`, the same composites are also made for named lon/lat
+boxes, drawn in PlateCarree (regular lat/lon). Each cell is drawn at its true
+position and shape, with no resampling, so a nest keeps its full detail when
+zoomed. For example,
+
+```bash
+modelatlasify /data/wrf/run01 -o ./atlas --plot-sub-areas="gulf,-98,-82,18,31,landfall,-95,-88,24,31"
+```
+
+adds `model-images/gulf/` and `model-images/landfall/`. Moving nests are drawn
+where they were at each time. A box entirely outside the outermost domain is
+reported and skipped.
+
 The catalog is *self-contained*: all links are relative, so you can move or
 upload the whole `atlas/` directory as is.
 
@@ -119,6 +135,7 @@ upload the whole `atlas/` directory as is.
 ```text
 modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitation]
               [--domains d01,d02] [-np N] [--no-plots] [--no-validate] [-v]
+              [--plot-sub-areas NAME,LON1,LON2,LAT1,LAT2[,NAME,...]]
 ```
 
 | option | meaning |
@@ -129,6 +146,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitat
 | `--domains` | Only process these WRF domains. |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
 | `--no-plots` | Skip PNG maps, including the composite maps (much faster for large domains). |
+| `--plot-sub-areas` | Extra composite maps of lon/lat boxes, as groups of five values: `NAME,LON1,LON2,LAT1,LAT2`. Names may use letters, digits, `_` and `-`; `full` is reserved. Longitudes may be in -180..180 or 0..360. The box runs east from LON1 to LON2, so LON2 < LON1 crosses the antimeridian. Ignored with `--no-plots`. |
 | `--no-validate` | Skip STAC JSON-schema validation, which downloads schemas. Asset links are always checked. |
 
 Exit status: `0` on success, `1` on errors (no usable data, a missing input

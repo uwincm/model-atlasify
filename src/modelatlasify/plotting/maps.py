@@ -1,15 +1,18 @@
 """Quick-look PNG maps of model fields.
 
-The map is drawn in the grid's own projection, so the field is placed with
-exactly the same CRS and affine transform as the GeoTIFF (no resampling and no
-lat/lon approximation). The extent always comes from the data's grid (for
-composites, the outermost grid; nested grids are placed on it exactly).
+A map shows a *view*: either a grid's whole area in the grid's own projection
+(per-item maps and "full" composites) or a lon/lat sub-area in PlateCarree.
+Fields are never resampled: in a grid's own projection they are placed with
+exactly the GeoTIFF's CRS and affine transform; elsewhere every cell is drawn
+as its true quadrilateral (pcolormesh on the projected cell corners).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -23,6 +26,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from pyproj import CRS, Transformer  # noqa: E402
 
+from modelatlasify.core.areas import SubArea  # noqa: E402
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
 from modelatlasify.core.variables import VariableDefinition  # noqa: E402
 
@@ -76,40 +80,72 @@ def _norm_and_cmap(variable: VariableDefinition, data: np.ndarray):
     return mcolors.Normalize(vmin=vmin, vmax=vmax), cmap
 
 
+@dataclass(frozen=True)
+class MapView:
+    """What a map shows. ``crs`` is the native CRS for a grid's own-projection
+    view, or None for a lon/lat view, whose x is longitude - ``center_lon``."""
+
+    projection: ccrs.Projection
+    extent: tuple[float, float, float, float]  # (x0, x1, y0, y1) in projection coords
+    extent_m: float  # size on the ground, for choosing the coastline detail
+    crs: CRS | None = None
+    center_lon: float = 0.0
+
+
+def full_view(grid: GridDefinition) -> MapView:
+    """The grid's whole area in its own projection."""
+    xmin, ymin, xmax, ymax = grid.native_bounds
+    return MapView(cartopy_projection(grid.crs), (xmin, xmax, ymin, ymax),
+                   _grid_extent_m(grid), crs=grid.crs)
+
+
+def subarea_view(area: SubArea) -> MapView:
+    """A lon/lat box in PlateCarree, centred on the box (antimeridian-safe)."""
+    c = area.center_lon
+    mid_lat = math.radians((area.south + area.north) / 2.0)
+    r = 6371e3
+    width_m = math.radians(area.east - area.west) * r * math.cos(mid_lat)
+    height_m = math.radians(area.north - area.south) * r
+    return MapView(ccrs.PlateCarree(central_longitude=c),
+                   (area.west - c, area.east - c, area.south, area.north),
+                   max(width_m, height_m), crs=None, center_lon=c)
+
+
 def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
     title: str, subtitle: str = "", dpi: int = 110,
 ) -> Path:
-    return _draw_map(path, [(field.data, grid)], variable, title, subtitle, dpi=dpi)
+    return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
+                     dpi=dpi)
 
 
 def plot_composite(
     path: Path, base: tuple[np.ndarray, GridDefinition],
     nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
-    title: str, subtitle: str = "", dpi: int = 110,
+    title: str, subtitle: str = "", area: SubArea | None = None, dpi: int = 110,
 ) -> Path:
-    """Map of the base grid's whole area with nested grids drawn on top (finest
-    last) and their boundaries outlined in black. A nest with ``data=None`` is
-    drawn as an outline only."""
-    return _draw_map(path, [base, *nests], variable, title, subtitle,
+    """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
+    grids drawn on top (finest last) and their boundaries outlined in black. A
+    nest with ``data=None`` is drawn as an outline only."""
+    view = full_view(base[1]) if area is None else subarea_view(area)
+    return _draw_map(path, view, [base, *nests], variable, title, subtitle,
                      outlines=[g for _, g in nests], dpi=dpi)
 
 
 def _draw_map(
-    path: Path, layers: list[tuple[np.ndarray | None, GridDefinition]],
+    path: Path, view: MapView, layers: list[tuple[np.ndarray | None, GridDefinition]],
     variable: VariableDefinition, title: str, subtitle: str = "",
     outlines: list[GridDefinition] = (), dpi: int = 110,
 ) -> Path:
-    """Draw ``layers`` (base grid first) over the base grid's extent."""
-    base_grid = layers[0][1]
-    proj = cartopy_projection(base_grid.crs)
-    xmin, ymin, xmax, ymax = base_grid.native_bounds
-    aspect = (xmax - xmin) / (ymax - ymin)
+    """Draw ``layers`` (coarsest first) in ``view``."""
+    proj = view.projection
+    x0, x1, y0, y1 = view.extent
+    aspect = (x1 - x0) / (y1 - y0)
     width_in = 11.0
     map_h = min(max(width_in / aspect, 3.0), 10.0)
     fig = plt.figure(figsize=(width_in, map_h + 1.6))
     ax = fig.add_axes([0.06, 0.20, 0.88, 0.66], projection=proj)
-    ax.set_extent((xmin, xmax, ymin, ymax), crs=proj)
+    ax.set_extent(view.extent, crs=proj)
     ax.set_facecolor("#e9eef2")
 
     drawn = [(np.asarray(d, dtype=np.float64), g) for d, g in layers if d is not None]
@@ -123,17 +159,25 @@ def _draw_map(
         for _, finer in drawn[k + 1:]:
             masked = np.ma.masked_where(_inside(grid, finer), masked)
         style = dict(cmap=cmap, norm=norm, zorder=1 + 0.1 * k)
-        extent = _extent_in(grid, base_grid.crs)
+        extent = _extent_in(grid, view.crs) if view.crs is not None else None
         if extent is not None:
             artist = ax.imshow(masked, origin="upper", extent=extent, transform=proj,
                                interpolation="nearest", **style)
-        else:  # not axis-aligned in the base CRS: place each cell exactly
-            xs, ys = _corners_in(grid, base_grid.crs)
-            artist = ax.pcolormesh(xs, ys, masked, transform=proj, shading="flat", **style)
+        else:  # not axis-aligned in the view: place each cell exactly
+            xs, ys = _corners_in_view(grid, view)
+            window = _crop_window(xs, ys, view)
+            if window is None:
+                continue  # this layer is nowhere in the view
+            r0, r1, c0, c1 = window
+            artist = ax.pcolormesh(xs[r0:r1 + 1, c0:c1 + 1], ys[r0:r1 + 1, c0:c1 + 1],
+                                   masked[r0:r1, c0:c1], transform=proj, shading="flat",
+                                   **style)
         img = img if img is not None else artist
-    _add_geography(ax, extent_m=_grid_extent_m(base_grid))
+    if img is None:  # nothing in view; keep the colour bar
+        img = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    _add_geography(ax, extent_m=view.extent_m)
     for grid in outlines:
-        bx, by = _boundary_in(grid, base_grid.crs)
+        bx, by = _to_view(view, grid.crs, *_boundary_points(grid))
         ax.plot(bx, by, color="black", linewidth=1.2, transform=proj, zorder=3)
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
@@ -217,18 +261,63 @@ def _inside(grid: GridDefinition, other: GridDefinition) -> np.ndarray:
     return (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
 
 
-def _boundary_in(grid: GridDefinition, crs: CRS, n: int = 100) -> tuple[np.ndarray, np.ndarray]:
-    """Closed outer boundary of ``grid`` in ``crs``, densified to follow curvature."""
+def _boundary_points(grid: GridDefinition, n: int = 100) -> tuple[np.ndarray, np.ndarray]:
+    """Closed outer boundary of ``grid`` in its own CRS, densified to follow
+    curvature once projected elsewhere."""
     xmin, ymin, xmax, ymax = grid.native_bounds
     s = np.linspace(0.0, 1.0, n, endpoint=False)
     xs = np.concatenate([xmin + s * (xmax - xmin), np.full(n, xmax),
                          xmax - s * (xmax - xmin), np.full(n, xmin), [xmin]])
     ys = np.concatenate([np.full(n, ymin), ymin + s * (ymax - ymin),
                          np.full(n, ymax), ymax - s * (ymax - ymin), [ymin]])
-    tr = _transformer(grid.crs, crs)
-    if tr is not None:
-        xs, ys = tr.transform(xs, ys)
-    return np.asarray(xs), np.asarray(ys)
+    return xs, ys
+
+
+def _to_view(view: MapView, crs: CRS, xs: np.ndarray, ys: np.ndarray
+             ) -> tuple[np.ndarray, np.ndarray]:
+    """Points in ``crs`` -> the view's projection coordinates."""
+    if view.crs is not None:
+        tr = _transformer(crs, view.crs)
+        if tr is not None:
+            xs, ys = tr.transform(xs, ys)
+        return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
+    lon, lat = Transformer.from_crs(crs, crs.geodetic_crs, always_xy=True).transform(xs, ys)
+    # Longitude relative to the view centre, in [-180, 180): no wrap inside a view.
+    x = (np.asarray(lon, dtype=np.float64) - view.center_lon + 180.0) % 360.0 - 180.0
+    return x, np.asarray(lat, dtype=np.float64)
+
+
+def _corners_in_view(grid: GridDefinition, view: MapView) -> tuple[np.ndarray, np.ndarray]:
+    """Pixel-corner coordinates of ``grid`` in the view, shape (height+1, width+1)."""
+    rows, cols = np.mgrid[0:grid.height + 1, 0:grid.width + 1]
+    return _to_view(view, grid.crs, *_apply(grid, cols, rows))
+
+
+def _crop_window(xs: np.ndarray, ys: np.ndarray, view: MapView
+                 ) -> tuple[int, int, int, int] | None:
+    """Cell window (row0, row1, col0, col1), end-exclusive, holding every cell
+    that can overlap the view, given the cell-corner coordinates; None if the
+    grid is nowhere in it. A cell overlapping the view has a corner within one
+    cell size of it, so the view is widened by the largest cell first."""
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    if not finite.any():
+        return None
+    with np.errstate(invalid="ignore"):
+        cell = max(np.nanmax(np.abs(np.diff(xs, axis=1))), np.nanmax(np.abs(np.diff(ys, axis=0))),
+                   np.nanmax(np.abs(np.diff(xs, axis=0))), np.nanmax(np.abs(np.diff(ys, axis=1))))
+    x0, x1, y0, y1 = view.extent
+    near = finite & (xs >= x0 - cell) & (xs <= x1 + cell) & (ys >= y0 - cell) & (ys <= y1 + cell)
+    if not near.any():
+        return None
+    rows = np.flatnonzero(near.any(axis=1))
+    cols = np.flatnonzero(near.any(axis=0))
+    h, w = xs.shape[0] - 1, xs.shape[1] - 1
+    return (max(rows[0] - 1, 0), min(rows[-1] + 1, h), max(cols[0] - 1, 0), min(cols[-1] + 1, w))
+
+
+def view_overlaps(view: MapView, grid: GridDefinition) -> bool:
+    """Whether any of ``grid`` is inside ``view``."""
+    return _crop_window(*_corners_in_view(grid, view), view) is not None
 
 
 def _geography_features(extent_m: float) -> list:
@@ -265,10 +354,13 @@ def _grid_extent_m(grid: GridDefinition) -> float:
     return max(xmax - xmin, ymax - ymin)
 
 
-def prefetch_geography(grid: GridDefinition) -> None:
-    """Download the Natural Earth data a map of ``grid`` needs, once, before
-    parallel workers start (concurrent first downloads can corrupt the cache)."""
-    _load_geography(_geography_features(_grid_extent_m(grid)))
+def prefetch_geography(extent: GridDefinition | SubArea) -> None:
+    """Download the Natural Earth data a map of a grid (or sub-area) needs, once,
+    before parallel workers start (concurrent first downloads can corrupt the
+    cache)."""
+    extent_m = (_grid_extent_m(extent) if isinstance(extent, GridDefinition)
+                else subarea_view(extent).extent_m)
+    _load_geography(_geography_features(extent_m))
 
 
 def _add_geography(ax, extent_m: float) -> None:

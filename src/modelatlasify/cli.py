@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from modelatlasify import __version__
 import modelatlasify.variables  # noqa: F401 - registers the standard variables
+from modelatlasify.core.areas import parse_sub_areas
 from modelatlasify.core.errors import ModelAtlasifyError
 from modelatlasify.core.variables import all_variables, resolve_names
 from modelatlasify.models import AVAILABLE_MODELS
@@ -47,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="number of worker processes for per-time processing (default: 1)")
     p.add_argument("--no-plots", dest="plots", action="store_false",
                    help="skip PNG map generation")
+    p.add_argument("--plot-sub-areas", default=None, metavar="NAME,LON1,LON2,LAT1,LAT2[,...]",
+                   help="extra composite maps of lon/lat boxes, drawn in PlateCarree under "
+                        "model-images/NAME/, e.g. --plot-sub-areas=gulf,-98,-82,18,31. "
+                        "Repeat the 5 values for more areas. The box runs east from LON1 "
+                        "to LON2 (-180..180 or 0..360), so LON2 < LON1 crosses the "
+                        "antimeridian")
     p.add_argument("--no-validate", dest="validate", action="store_false",
                    help="skip STAC JSON-schema validation (asset links are always checked)")
     p.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
@@ -54,7 +64,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def write_command_record(run_dir: Path, argv: list[str], started: datetime) -> Path:
+    """Save the command line (and where it was run) as
+    ``<run_dir>/command-used.<YYYYMMDDTHHMMSSZ>.txt`` for reproducibility."""
+    path = run_dir / f"command-used.{started:%Y%m%dT%H%M%SZ}.txt"
+    path.write_text(
+        "modelatlasify " + shlex.join(argv) + "\n\n"
+        f"# started:   {started:%Y-%m-%d %H:%M:%S} UTC\n"
+        f"# directory: {os.getcwd()}\n"
+        f"# version:   ModelAtlasify {__version__}\n"
+    )
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
+    started = datetime.now(timezone.utc)
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.processes < 1:
@@ -73,17 +98,26 @@ def main(argv: list[str] | None = None) -> int:
         _status(f"error: {exc.args[0]}")
         return 2
     domains = [d.strip() for d in args.domains.split(",")] if args.domains else None
+    sub_areas = []
+    if args.plot_sub_areas:
+        try:
+            sub_areas = parse_sub_areas(args.plot_sub_areas)
+        except ValueError as exc:
+            parser.error(f"--plot-sub-areas: {exc}")
 
     from modelatlasify.core.processing import PipelineOptions, run_pipeline
     from modelatlasify.core.validation import validate_catalog
 
     options = PipelineOptions(
         inputs=args.inputs, output=args.output, model=args.model, variables=variables,
-        plots=args.plots, domains=domains, processes=args.processes,
+        plots=args.plots, domains=domains, processes=args.processes, sub_areas=sub_areas,
     )
     _status(f"ModelAtlasify {__version__}: {args.model.upper()} -> {args.output.resolve()}")
     _status(f"Variables: {', '.join(variables)}"
             + (f" ({args.processes} processes)" if args.processes > 1 else ""))
+    if sub_areas:
+        _status("Sub-areas: " + ", ".join(a.name for a in sub_areas)
+                + ("" if args.plots else " (ignored: --no-plots)"))
     try:
         result = run_pipeline(options, report=_status)
     except ModelAtlasifyError as exc:
@@ -100,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     _status(f"Generated {result.n_items} STAC items, {result.n_geotiffs} GeoTIFFs, "
             f"{result.n_plots} maps, {result.n_composites} composite maps "
             f"in {result.seconds:.0f} s.")
+    for run_id in dict.fromkeys(d.run_id for d in result.datasets):
+        write_command_record(result.catalog_path.parent / run_id, argv, started)
     _status("Checking catalog links" + (" and validating STAC schemas..." if args.validate else "..."))
     report = validate_catalog(result.catalog_path, schemas=args.validate)
     if report.missing_hrefs:

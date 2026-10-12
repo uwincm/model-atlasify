@@ -94,5 +94,5 @@ def test_composite_task_uses_the_nest_position_at_each_time(moving_run):
     for ds in (d01, d02):
         for t in ds.valid_times:
             products[(ds.dataset_id, t, "surface_wind_speed")] = (f"{ds.dataset_id}{t:%H}.tif", meta)
-    tasks = _composite_tasks(moving_run, [d01, d02], ["surface_wind_speed"], products, "full", "uwincm")
+    tasks = _composite_tasks(moving_run, [d01, d02], ["surface_wind_speed"], products, None, "uwincm")
     assert [t.nests[0][1] for t in tasks] == [0, 1, 2, 3]

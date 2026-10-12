@@ -1,4 +1,5 @@
 import re
+import shlex
 import shutil
 import subprocess
 
@@ -141,3 +142,43 @@ def test_cli_parallel_quality_skips_and_errors(tmp_path, capsys):
     assert main([str(bad), "-o", str(tmp_path / "b"), "-np", "2", "--no-plots"]) == 1
     err = capsys.readouterr().err
     assert "error: Cannot compute precipitation" in err and "Traceback" not in err
+
+
+def test_parse_sub_areas():
+    from modelatlasify.core.areas import SubArea, parse_sub_areas
+
+    assert parse_sub_areas("gulf,-98,-82,18,31, lee ,265,272,24,31") == [
+        SubArea("gulf", -98.0, -82.0, 18.0, 31.0), SubArea("lee", -95.0, -88.0, 24.0, 31.0)]
+    (pac,) = parse_sub_areas("pacific,170,-170,-10,10")  # crosses the antimeridian
+    assert (pac.west, pac.east, pac.center_lon) == (170.0, 190.0, 180.0)
+
+
+@pytest.mark.parametrize("value", [
+    "gulf,-98,-82,18",                     # not a multiple of 5
+    "gulf,-98,-82,31,18",                  # LAT1 >= LAT2
+    "gulf,-98,-82,18,95",                  # latitude out of range
+    "full,-98,-82,18,31",                  # reserved name
+    "a,1,2,3,4,a,5,6,7,8",                 # duplicate name
+    "bad name,1,2,3,4",                    # unsafe name
+    "gulf,west,-82,18,31",                 # not a number
+    "gulf,-98,-98,18,31",                  # empty longitude range
+])
+def test_cli_rejects_bad_sub_areas(wrf_run, tmp_path, value, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main([str(wrf_run), "-o", str(tmp_path / "a"), f"--plot-sub-areas={value}"])
+    assert exc.value.code == 2
+    assert "--plot-sub-areas" in capsys.readouterr().err
+
+
+def test_command_is_recorded_in_each_run_directory(tmp_path):
+    for name in ("runA", "runB"):
+        write_wrfout(tmp_path / name, hourly(T0, 2))
+    out = tmp_path / "atlas"
+    argv = [str(tmp_path / "runA"), str(tmp_path / "runB"), "-o", str(out), "--no-plots",
+            "--no-validate", "--variables=wind"]
+    assert main(argv) == 0
+    for name in ("runA", "runB"):
+        (record,) = (out / name).glob("command-used.*.txt")
+        assert re.fullmatch(r"command-used\.\d{8}T\d{6}Z\.txt", record.name)
+        first = record.read_text().splitlines()[0]
+        assert shlex.split(first) == ["modelatlasify", *argv]  # the line can be pasted back into a shell

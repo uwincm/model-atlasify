@@ -22,6 +22,7 @@ import numpy as np
 from tqdm import tqdm
 
 import modelatlasify.variables  # noqa: F401 - registers the standard variables
+from modelatlasify.core.areas import FULL_AREA, SubArea
 from modelatlasify.core.catalog import AssetRecord, CatalogBuilder, ItemRecord
 from modelatlasify.core.errors import DiscoveryError, FieldQualityError
 from modelatlasify.core.model import FieldResult, ModelAdapter, ModelDataset
@@ -44,6 +45,7 @@ class PipelineOptions:
     domains: list[str] | None = None  # e.g. ["d01"]; None = all
     processes: int = 1  # worker processes for the per-time work
     image_prefix: str = "uwincm"  # file name prefix of the composite maps
+    sub_areas: list[SubArea] = field(default_factory=list)  # zoomed composites, in lon/lat
 
 
 @dataclass
@@ -187,6 +189,7 @@ class _CompositeTask:
     run_id: str
     variable: str
     path: Path
+    area: SubArea | None  # None = the base domain's whole area
     base: tuple[str, int, Path, FieldResult]  # (dataset_id, time index, GeoTIFF, metadata)
     # (dataset_id, time index or None for a fixed nest without output then,
     #  GeoTIFF or None = outline only)
@@ -195,8 +198,9 @@ class _CompositeTask:
 
 def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
                      products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]],
-                     plot_area: str, prefix: str) -> list[_CompositeTask]:
-    """Composite maps of one run over the outermost domain's whole area.
+                     area: SubArea | None, prefix: str) -> list[_CompositeTask]:
+    """Composite maps of one run over the outermost domain's whole area, or
+    over a lon/lat sub-area.
 
     ``products`` maps (dataset_id, valid time, variable) to the published
     GeoTIFF. A nest is overlaid only when its product covers the same period as
@@ -206,6 +210,7 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
     output at that time is left out, since its position is unknown.
     """
     base, *nests = sorted(datasets, key=lambda d: d.dataset_id)
+    plot_area = FULL_AREA if area is None else area.name
     tasks = []
     nest_times = {n.dataset_id: {t: i for i, t in enumerate(n.valid_times)} for n in nests}
     for bi, valid in enumerate(base.valid_times):
@@ -224,8 +229,17 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
                 overlays.append((nest.dataset_id, ni, p[0] if same_period else None))
             tasks.append(_CompositeTask(
                 base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
-                (base.dataset_id, bi, tif, meta), overlays))
+                area, (base.dataset_id, bi, tif, meta), overlays))
     return tasks
+
+
+def _area_in_run(area: SubArea, datasets: list[ModelDataset]) -> bool:
+    """Whether the sub-area overlaps the run's outermost domain."""
+    from modelatlasify.plotting.maps import subarea_view, view_overlaps
+
+    base = min(datasets, key=lambda d: d.dataset_id)
+    view = subarea_view(area)
+    return any(view_overlaps(view, g) for g in base.distinct_grids())
 
 
 def _read_tif(path: Path) -> np.ndarray:
@@ -246,10 +260,18 @@ def _plot_composite(task: _CompositeTask) -> Path:
         grid = nest.grid if ni is None else nest.grid_at(ni)
         nests.append((None if tif is None else _read_tif(tif), grid))
     title, subtitle = _titles(base_ds, meta, var.long_name, var.units)
-    overlaid = [nid for nid, _, tif in task.nests if tif is not None]
-    subtitle += "".join(f" + {nid}" for nid in overlaid)
+    overlaid = [(nid, grid) for (nid, _, tif), (_, grid) in zip(task.nests, nests)
+                if tif is not None]
+    if task.area is not None:  # name only the nests that are in the area
+        from modelatlasify.plotting.maps import subarea_view, view_overlaps
+
+        view = subarea_view(task.area)
+        overlaid = [(nid, g) for nid, g in overlaid if view_overlaps(view, g)]
+    subtitle += "".join(f" + {nid}" for nid, _ in overlaid)
+    if task.area is not None:
+        subtitle += f"  |  area '{task.area.name}'"
     return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid_at(bi)),
-                                     nests, var, title, subtitle)
+                                     nests, var, title, subtitle, area=task.area)
 
 
 def _log_levels() -> dict[str, int]:
@@ -287,6 +309,8 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
 
             for ds in all_datasets.values():
                 prefetch_geography(ds.grid)
+            for area in options.sub_areas:
+                prefetch_geography(area)
         adapter.close()  # workers open their own file handles
 
         init_args = (options.model, all_datasets, options.output, options.variables,
@@ -330,8 +354,15 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                             products[(ds.dataset_id, ds.valid_times[ti], a.variable)] = (
                                 a.path, a.field)
             if options.plots:
-                tasks = _composite_tasks(builder.run_dir(run_id), datasets, options.variables,
-                                         products, "full", options.image_prefix)
+                tasks = []
+                for area in [None, *options.sub_areas]:
+                    if area is not None and not _area_in_run(area, datasets):
+                        report(f"WARNING: sub-area '{area.name}' is entirely outside run "
+                               f"'{run_id}'; no maps made for it.")
+                        continue
+                    tasks += _composite_tasks(builder.run_dir(run_id), datasets,
+                                              options.variables, products, area,
+                                              options.image_prefix)
                 for _ in tqdm(mapper_composite(tasks), total=len(tasks),
                               desc=f"{run_id} composite maps", unit="map", file=sys.stderr,
                               disable=not progress):
