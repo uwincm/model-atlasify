@@ -86,6 +86,9 @@ class _WRFState:
     slots: list[_TimeSlot]  # where each valid time lives
     accumulation_start: datetime | None
     output_interval: timedelta | None  # the run's history-output cadence
+    # Result of the accumulated-precipitation check per time (None = passed),
+    # filled by WRFAdapter.prepare() so worker processes can look it up.
+    accumulation_problems: list[str | None] | None = None
 
 
 class WRFAdapter(ModelAdapter):
@@ -438,6 +441,9 @@ class WRFAdapter(ModelAdapter):
         Accumulations can only grow, so the field is compared with the nearest
         earlier output that itself passed this check.
         """
+        precomputed = dataset.adapter_state.accumulation_problems
+        if precomputed is not None:
+            return precomputed[t]
         key = (dataset.run_id, dataset.dataset_id, t)
         if key in self._accum_check:
             return self._accum_check[key]
@@ -460,6 +466,18 @@ class WRFAdapter(ModelAdapter):
                     )
         self._accum_check[key] = problem
         return problem
+
+    def prepare(self, dataset: ModelDataset, variables: list[str]) -> None:
+        """Run the accumulation check for every time, in order (each check
+        compares with the previous valid time, so in-order evaluation recurses
+        only one level), and keep the results in the dataset's state."""
+        if not {"precipitation", "precipitation_interval"} & set(variables):
+            return
+        state = dataset.adapter_state
+        if state.accumulation_problems is None:
+            state.accumulation_problems = [
+                self._accumulation_problem(dataset, t) for t in range(len(dataset.valid_times))
+            ]
 
     def _checked_accumulation(self, dataset, t):
         problem = self._accumulation_problem(dataset, t)

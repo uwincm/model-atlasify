@@ -99,7 +99,7 @@ def plot_field(
         masked, origin="upper", extent=(xmin, xmax, ymin, ymax), transform=proj,
         cmap=cmap, norm=norm, interpolation="nearest", zorder=1,
     )
-    _add_geography(ax, extent_m=max(xmax - xmin, ymax - ymin))
+    _add_geography(ax, extent_m=_grid_extent_m(grid))
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
         gl.top_labels = False
@@ -128,11 +128,10 @@ def plot_field(
     return path
 
 
-def _add_geography(ax, extent_m: float) -> None:
-    """Land, coastlines and borders from Natural Earth (downloaded once by cartopy)."""
-    global _coastline_warning_shown
+def _geography_features(extent_m: float) -> list:
+    """Natural Earth land, coastlines and borders at a scale suited to the extent."""
     res = "10m" if extent_m < 800e3 else "50m" if extent_m < 6000e3 else "110m"
-    features = [
+    return [
         (cfeature.NaturalEarthFeature("physical", "land", res),
          dict(facecolor="#f4f1ea", edgecolor="none", zorder=0)),
         (cfeature.NaturalEarthFeature("physical", "coastline", res),
@@ -140,15 +139,39 @@ def _add_geography(ax, extent_m: float) -> None:
         (cfeature.BORDERS.with_scale(res),
          dict(facecolor="none", edgecolor="0.3", linewidth=0.4, zorder=2)),
     ]
+
+
+def _load_geography(features: list) -> bool:
+    """Force cartopy to download/read the features now; False if unavailable."""
+    global _coastline_warning_shown
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # DownloadWarning noise
             for feature, _ in features:
-                next(iter(feature.geometries()), None)  # force download/read now
+                next(iter(feature.geometries()), None)
     except Exception as exc:  # noqa: BLE001 - offline: plot without coastlines
         if not _coastline_warning_shown:
             log.warning("Could not load Natural Earth coastlines (%s); maps will not show them.", exc)
             _coastline_warning_shown = True
+        return False
+    return True
+
+
+def _grid_extent_m(grid: GridDefinition) -> float:
+    xmin, ymin, xmax, ymax = grid.native_bounds
+    return max(xmax - xmin, ymax - ymin)
+
+
+def prefetch_geography(grid: GridDefinition) -> None:
+    """Download the Natural Earth data a map of ``grid`` needs, once, before
+    parallel workers start (concurrent first downloads can corrupt the cache)."""
+    _load_geography(_geography_features(_grid_extent_m(grid)))
+
+
+def _add_geography(ax, extent_m: float) -> None:
+    """Land, coastlines and borders from Natural Earth (downloaded once by cartopy)."""
+    features = _geography_features(extent_m)
+    if not _load_geography(features):
         return
     for feature, style in features:
         ax.add_feature(feature, **style)

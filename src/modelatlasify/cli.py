@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="comma-separated variables to generate (default: wind,precipitation)")
     p.add_argument("--domains", default=None,
                    help="comma-separated domains to process, e.g. d01 (default: all)")
+    p.add_argument("-np", "--processes", type=int, default=1, metavar="N",
+                   help="number of worker processes for per-time processing (default: 1)")
     p.add_argument("--no-plots", dest="plots", action="store_false",
                    help="skip PNG map generation")
     p.add_argument("--no-validate", dest="validate", action="store_false",
@@ -53,7 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.processes < 1:
+        parser.error("-np/--processes must be at least 1")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(levelname)s: %(message)s",
@@ -74,10 +79,11 @@ def main(argv: list[str] | None = None) -> int:
 
     options = PipelineOptions(
         inputs=args.inputs, output=args.output, model=args.model, variables=variables,
-        plots=args.plots, domains=domains,
+        plots=args.plots, domains=domains, processes=args.processes,
     )
     _status(f"ModelAtlasify {__version__}: {args.model.upper()} -> {args.output.resolve()}")
-    _status(f"Variables: {', '.join(variables)}")
+    _status(f"Variables: {', '.join(variables)}"
+            + (f" ({args.processes} processes)" if args.processes > 1 else ""))
     try:
         result = run_pipeline(options, report=_status)
     except ModelAtlasifyError as exc:

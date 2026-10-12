@@ -80,7 +80,8 @@ class FieldResult:
     """A computed 2-D field for one variable at one valid time."""
 
     variable: str
-    data: np.ndarray  # float, (height, width), north-up, NaN = missing
+    data: np.ndarray | None  # float, (height, width), north-up, NaN = missing
+    # (None once written out, e.g. in records returned by worker processes)
     valid_time: datetime
     # For period quantities (e.g. precipitation over an output interval).
     start_time: datetime | None = None
@@ -114,6 +115,12 @@ class ModelAdapter(abc.ABC):
         :class:`~modelatlasify.core.errors.VariableUnavailableError` when the
         required model fields are missing.
         """
+
+    def prepare(self, dataset: ModelDataset, variables: list[str]) -> None:  # noqa: B027
+        """Optional hook, run once per dataset in the main process before any
+        :meth:`compute` call. Adapters use it for work that depends on earlier
+        times (e.g. accumulation checks) and store the results in
+        ``dataset.adapter_state``, so parallel workers need not redo it."""
 
     def close(self) -> None:  # noqa: B027 - optional hook
         """Release any open file handles."""

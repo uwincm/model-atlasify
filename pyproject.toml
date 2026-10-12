@@ -19,6 +19,7 @@ dependencies = [
     "matplotlib",
     "cartopy",
     "pystac",
+    "tqdm",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,7 @@ shapely = ">=2.0"
 matplotlib-base = ">=3.8"
 cartopy = ">=0.23"
 pystac = ">=1.10"
+tqdm = ">=4.60"
 jsonschema = ">=4.0"
 
 [tool.pixi.pypi-dependencies]

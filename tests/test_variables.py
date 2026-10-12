@@ -135,6 +135,27 @@ def test_decreasing_accumulation_is_rejected(tmp_path):
         adapter.compute(ds, "precipitation_interval", 2)
 
 
+def test_prepare_precomputes_accumulation_checks(tmp_path):
+    import netCDF4
+
+    times = hourly(T0, 4)
+    paths = write_wrfout(tmp_path / "r", times)
+    with netCDF4.Dataset(paths[2], "a") as nc:
+        nc["RAINNC"][0] = 0.0
+        nc["RAINC"][0] = 0.0
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    adapter.prepare(ds, ["precipitation"])
+    problems = ds.adapter_state.accumulation_problems
+    assert [p is None for p in problems] == [True, True, False, True]  # t=3 compared with t=1
+    fresh = WRFAdapter()  # like a worker process: relies on the precomputed checks
+    with pytest.raises(FieldQualityError, match="lower than at"):
+        fresh.compute(ds, "precipitation", 2)
+    assert fresh.compute(ds, "precipitation", 3) is not None
+    with pytest.raises(FieldQualityError, match="previous output time is unusable"):
+        fresh.compute(ds, "precipitation_interval", 3)
+
+
 def test_interval_helper_clips_roundoff_and_masks_real_decreases():
     out, n_bad = interval_precipitation(np.array([1.0, 0.995, 0.5]), np.array([0.5, 1.0, 1.0]))
     np.testing.assert_allclose(out[:2], [0.5, 0.0])

@@ -54,17 +54,15 @@ STAC validation.
 ## Example
 
 ```bash
-pixi run modelatlasify /data/wrf/run01 --output ./atlas
+pixi run modelatlasify /data/wrf/run01 --output ./atlas -np 8
 ```
 
 ```text
 ModelAtlasify 0.1.0: WRF -> /home/me/atlas
-Variables: surface_wind_speed, precipitation, precipitation_interval
+Variables: surface_wind_speed, precipitation, precipitation_interval (8 processes)
 Found WRF run 'run01' in /data/wrf/run01:
-  d01: 25 file(s), 25 time(s) 2026-10-06 00:00 -> 2026-10-07 00:00 UTC, 1649x699 grid, georeference fit error 2.4 m
-  [run01 d01 1/25] 2026-10-06 00:00 UTC: surface_wind_speed, precipitation
-  [run01 d01 2/25] 2026-10-06 01:00 UTC: surface_wind_speed, precipitation, precipitation_interval
-  ...
+  d01: 25 file(s), 25 time(s) 2026-10-06 00:00 -> 2026-10-07 00:00 UTC, 1649x699 grid, georeference fit error 2.4 m.
+run01 d01: 100%|██████████████████████████████| 25/25 [00:06<00:00,  3.9time/s]
 Generated 25 STAC items, 74 GeoTIFFs, 74 maps in 31 s.
 Checking catalog links and validating STAC schemas...
 STAC validation passed for 27 objects; all asset links resolve.
@@ -99,7 +97,7 @@ upload the whole `atlas/` directory as is.
 
 ```text
 modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitation]
-              [--domains d01,d02] [--no-plots] [--no-validate] [-v]
+              [--domains d01,d02] [-np N] [--no-plots] [--no-validate] [-v]
 ```
 
 | option | meaning |
@@ -108,6 +106,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitat
 | `-o, --output` | Output directory (default `./atlas`). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--variables` | `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), or exact names such as `precipitation_interval`. |
 | `--domains` | Only process these WRF domains. |
+| `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
 | `--no-plots` | Skip PNG maps (much faster for large domains). |
 | `--no-validate` | Skip STAC JSON-schema validation, which downloads schemas. Asset links are always checked. |
 
@@ -146,7 +145,11 @@ Everything after the adapter works only with model-agnostic types: a
 (e.g. HYCOM, a wave model, or another component of a coupled run):
 
 1. Write `models/<name>/adapter.py` implementing `ModelAdapter.discover()`,
-   `supported_variables()` and `compute()`.
+   `supported_variables()` and `compute()`. `compute()` may run in a worker
+   process (with `-np`), so it must not depend on earlier `compute()` calls;
+   put any work that does (like WRF's check that accumulations never
+   decrease) in the optional `prepare()` hook, which runs once per dataset in
+   the main process and stores its results in `dataset.adapter_state`.
 2. Register it in `models/__init__.py:get_adapter`.
 3. To add a new kind of product, register a `VariableDefinition` in
    `variables/` and teach the relevant adapters how to compute it.
