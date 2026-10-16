@@ -26,11 +26,11 @@ from tqdm import tqdm
 import modelatlasify.variables  # noqa: F401 - registers the standard variables
 from modelatlasify.core.areas import FULL_AREA, SubArea
 from modelatlasify.core.catalog import AssetRecord, CatalogBuilder, ItemRecord
-from modelatlasify.core.errors import DiscoveryError, FieldQualityError
+from modelatlasify.core.errors import DiscoveryError, FieldQualityError, NoModelOutputError
 from modelatlasify.core.model import FieldResult, ModelAdapter, ModelDataset
 from modelatlasify.core.variables import VariableDefinition, get_variable
 from modelatlasify.geospatial.geotiff import write_geotiff
-from modelatlasify.models import get_adapter
+from modelatlasify.models import AVAILABLE_MODELS, get_adapter
 
 log = logging.getLogger(__name__)
 
@@ -39,10 +39,11 @@ log = logging.getLogger(__name__)
 class PipelineOptions:
     inputs: list[Path]
     output: Path
-    model: str = "wrf"
-    variables: list[str] = field(
-        default_factory=lambda: ["surface_wind_speed", "precipitation", "precipitation_interval"]
-    )
+    #: "auto" (every model whose output is found in an input directory), one
+    #: model name, or a comma-separated list, e.g. "wrf,dwm".
+    model: str = "auto"
+    #: None = every variable the models found can produce.
+    variables: list[str] | None = None
     plots: bool = True
     domains: list[str] | None = None  # e.g. ["d01"]; None = all
     processes: int = 1  # worker processes for the per-time work
@@ -82,9 +83,20 @@ def run_location(directory: Path, cut_dirs: int = 0) -> tuple[PurePosixPath, str
     return PurePosixPath(*kept), run_id, over_cut
 
 
-def discover(adapter: ModelAdapter, inputs: list[Path], domains: list[str] | None,
+def model_names(model: str) -> list[str]:
+    """Adapter names for PipelineOptions.model ("auto", "wrf", "wrf,dwm", ...)."""
+    if model.strip().lower() == "auto":
+        return list(AVAILABLE_MODELS)
+    return [m.strip().lower() for m in model.split(",") if m.strip()]
+
+
+def discover(adapters: list[ModelAdapter], inputs: list[Path], domains: list[str] | None,
              report: Callable[[str], None], cut_dirs: int = 0) -> dict[str, list[ModelDataset]]:
-    """Discover datasets in every input directory, grouped by run id."""
+    """Discover datasets in every input directory, grouped by run id.
+
+    Every adapter looks at every input directory; a model whose output is
+    absent (e.g. a coupled run with the wave model switched off) is skipped.
+    """
     runs: dict[str, list[ModelDataset]] = {}
     for directory in inputs:
         run_path, run_id, over_cut = run_location(directory, cut_dirs)
@@ -94,15 +106,26 @@ def discover(adapter: ModelAdapter, inputs: list[Path], domains: list[str] | Non
         if over_cut:
             report(f"WARNING: --cut-dirs={cut_dirs} removes all parent directories of "
                    f"{os.path.abspath(directory)}; using '{run_path}' only.")
-        found = adapter.discover(directory)
+        if not Path(directory).is_dir():
+            raise DiscoveryError(f"Input directory does not exist: {directory}")
+        found, absent = [], []
+        for adapter in adapters:
+            try:
+                found += adapter.discover(directory)
+            except NoModelOutputError as exc:
+                absent.append(str(exc))
+        if not found:
+            raise DiscoveryError("; ".join(absent))
         if domains:
-            found = [d for d in found if d.dataset_id.split("-")[0] in domains]
+            wanted = {d.lower() for d in domains}
+            found = [d for d in found if d.dataset_id.split("-")[0].lower() in wanted]
             if not found:
                 raise DiscoveryError(f"No output for domain(s) {', '.join(domains)} in {directory}")
         for d in found:
             d.run_id, d.run_path = run_id, run_path.as_posix()
         runs[run_id] = found
-        report(f"Found {adapter.name} run '{run_path}' in {directory}:")
+        models = " + ".join(dict.fromkeys(d.model for d in found))
+        report(f"Found {models} run '{run_path}' in {directory}:")
         for d in found:
             g = d.grid
             report(
@@ -133,7 +156,7 @@ class _TimeResult:
 _worker: dict = {}
 
 
-def _init_worker(model: str, datasets: dict[tuple[str, str], ModelDataset], output: Path,
+def _init_worker(models: list[str], datasets: dict[tuple[str, str], ModelDataset], output: Path,
                  variables: list[str], plots: bool, log_levels: dict[str, int]) -> None:
     for name, level in log_levels.items():
         if name == "":
@@ -143,14 +166,14 @@ def _init_worker(model: str, datasets: dict[tuple[str, str], ModelDataset], outp
     if plots:  # heavy imports; only when needed
         from modelatlasify.plotting.maps import plot_composite, plot_field
     _worker.clear()
-    _worker.update(adapter=get_adapter(model), datasets=datasets,
+    adapters = {a.name: a for a in map(get_adapter, models)}
+    _worker.update(adapters=adapters, datasets=datasets,
                    builder=CatalogBuilder(output), variables=variables, plot_field=plot_field,
                    plot_composite=plot_composite)
 
 
 def _close_worker() -> None:
-    adapter = _worker.get("adapter")
-    if adapter is not None:
+    for adapter in _worker.get("adapters", {}).values():
         adapter.close()
     _worker.clear()
 
@@ -158,13 +181,14 @@ def _close_worker() -> None:
 def _process_time(task: tuple[str, str, int]) -> _TimeResult:
     """Compute, check, write and plot every variable at one valid time."""
     run_id, dataset_id, ti = task
-    adapter: ModelAdapter = _worker["adapter"]
-    plot_field = _worker["plot_field"]
     ds: ModelDataset = _worker["datasets"][(run_id, dataset_id)]
+    adapter: ModelAdapter = _worker["adapters"][ds.model]
+    plot_field = _worker["plot_field"]
     valid = ds.valid_times[ti]
     item_dir = _worker["builder"].item_dir(ds, valid)
     res = _TimeResult(run_id, dataset_id, ti)
-    for vname in _worker["variables"]:
+    supported = adapter.supported_variables()
+    for vname in (v for v in _worker["variables"] if v in supported):
         var = get_variable(vname)
         try:
             fld = adapter.compute(ds, vname, ti)
@@ -212,6 +236,7 @@ class _CompositeTask:
     variable: str
     path: Path
     area: SubArea | None  # None = the base domain's whole area
+    edge: bool  # outline the base domain's edge (dashed)
     base: tuple[str, int, Path, FieldResult]  # (dataset_id, time index, GeoTIFF, metadata)
     # (dataset_id, time index or None for a fixed nest without output then,
     #  GeoTIFF or None = outline only)
@@ -220,7 +245,8 @@ class _CompositeTask:
 
 def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
                      products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]],
-                     area: SubArea | None, prefix: str) -> list[_CompositeTask]:
+                     area: SubArea | None, prefix: str, edge: bool = False
+                     ) -> list[_CompositeTask]:
     """Composite maps of one run over the outermost domain's whole area, or
     over a lon/lat sub-area.
 
@@ -251,7 +277,7 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
                 overlays.append((nest.dataset_id, ni, p[0] if same_period else None))
             tasks.append(_CompositeTask(
                 base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
-                area, (base.dataset_id, bi, tif, meta), overlays))
+                area, edge, (base.dataset_id, bi, tif, meta), overlays))
     return tasks
 
 
@@ -293,7 +319,8 @@ def _plot_composite(task: _CompositeTask) -> Path:
     if task.area is not None:
         subtitle += f"  |  area '{task.area.name}'"
     return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid_at(bi)),
-                                     nests, var, title, subtitle, area=task.area)
+                                     nests, var, title, subtitle, area=task.area,
+                                     domain_edge=task.edge)
 
 
 def _log_levels() -> dict[str, int]:
@@ -307,25 +334,37 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
     t0 = time.monotonic()
     if options.processes < 1:
         raise ValueError("processes must be >= 1")
-    adapter = get_adapter(options.model)
-    unsupported = [v for v in options.variables if v not in adapter.supported_variables()]
-    if unsupported:
-        raise DiscoveryError(
-            f"{adapter.name} adapter cannot produce: {', '.join(unsupported)}. "
-            f"Supported: {', '.join(adapter.supported_variables())}"
-        )
+    names = model_names(options.model)
+    adapter_list = [get_adapter(n) for n in names]  # KeyError for an unknown model
+    adapters = {a.name: a for a in adapter_list}
 
     pool = None
     try:
-        runs = discover(adapter, options.inputs, options.domains, report, options.cut_dirs)
-        skipped = list(getattr(adapter, "skipped_files", []))
+        runs = discover(adapter_list, options.inputs, options.domains, report, options.cut_dirs)
+        used = [adapters[m] for m in dict.fromkeys(d.model for ds in runs.values() for d in ds)]
+        variables = _variables_for(options.variables, used)
+        for run_id in list(runs):  # leave out models that make none of the variables
+            keep = [d for d in runs[run_id]
+                    if set(variables) & set(adapters[d.model].supported_variables())]
+            for d in runs[run_id]:
+                if d not in keep:
+                    report(f"  ({d.model} {d.dataset_id} of '{d.run_path}' skipped: it provides "
+                           "none of the requested variables)")
+            if keep:
+                runs[run_id] = keep
+            else:
+                del runs[run_id]
+        if not runs:
+            raise DiscoveryError("None of the inputs provides the requested variables.")
+        skipped = [s for a in adapter_list for s in getattr(a, "skipped_files", [])]
         if skipped:
             report(f"WARNING: skipped {len(skipped)} unusable file(s), e.g. "
                    f"{skipped[0][0].name}: {skipped[0][1]}")
 
         all_datasets = {(d.run_id, d.dataset_id): d for dss in runs.values() for d in dss}
         for ds in all_datasets.values():
-            adapter.prepare(ds, options.variables)
+            adapter = adapters[ds.model]
+            adapter.prepare(ds, [v for v in variables if v in adapter.supported_variables()])
         if options.plots:
             from modelatlasify.plotting.maps import prefetch_geography
 
@@ -333,10 +372,11 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                 prefetch_geography(ds.grid)
             for area in options.sub_areas:
                 prefetch_geography(area)
-        adapter.close()  # workers open their own file handles
+        for adapter in adapter_list:
+            adapter.close()  # workers open their own file handles
 
-        init_args = (options.model, all_datasets, options.output, options.variables,
-                     options.plots, _log_levels())
+        init_args = (names, all_datasets, options.output, variables, options.plots,
+                     _log_levels())
         n_tasks = sum(len(d.valid_times) for d in all_datasets.values())
         processes = min(options.processes, n_tasks)
         if processes > 1:
@@ -377,19 +417,24 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                                 a.path, a.field)
             if options.plots:
                 tasks = []
-                for area in ([None] if options.full_plots else []) + options.sub_areas:
-                    if area is not None and not _area_in_run(area, datasets):
-                        report(f"WARNING: sub-area '{area.name}' is entirely outside run "
-                               f"'{datasets[0].run_path}'; no maps made for it.")
-                        continue
-                    tasks += _composite_tasks(builder.run_dir(datasets[0]), datasets,
-                                              options.variables, products, area,
-                                              options.image_prefix)
+                for group in _model_groups(datasets):  # each model has its own maps
+                    model = group[0].model
+                    for area in ([None] if options.full_plots else []) + options.sub_areas:
+                        if area is not None and not _area_in_run(area, group):
+                            report(f"WARNING: sub-area '{area.name}' is entirely outside the "
+                                   f"{model} domain of run '{group[0].run_path}'; no {model} "
+                                   "maps made for it.")
+                            continue
+                        tasks += _composite_tasks(builder.run_dir(group[0]), group, variables,
+                                                  products, area, options.image_prefix,
+                                                  edge=adapters[model].outline_domain_edge)
                 for _ in tqdm(mapper_composite(tasks), total=len(tasks),
                               desc=f"{datasets[0].run_name} composite maps", unit="map", file=sys.stderr,
                               disable=not progress):
                     n_comp += 1
-            builder.add_run(run_id, datasets, items, options.variables)
+            builder.add_run(run_id, datasets, items,
+                            [v for v in variables if any(v in adapters[d.model].supported_variables()
+                                                         for d in datasets)])
         catalog_path = builder.save()
     finally:
         if pool is not None:
@@ -397,7 +442,8 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
             pool.join()
         else:
             _close_worker()
-        adapter.close()
+        for adapter in adapter_list:
+            adapter.close()
 
     return PipelineResult(
         catalog_path=catalog_path,
@@ -405,6 +451,28 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
         n_items=n_items, n_geotiffs=n_tif, n_plots=n_png, n_composites=n_comp,
         skipped_files=skipped, quality_skips=quality_skips, seconds=time.monotonic() - t0,
     )
+
+
+def _variables_for(requested: list[str] | None, adapters: list[ModelAdapter]) -> list[str]:
+    """The variables to produce: as requested (each made by the models that
+    can), or everything the models found can produce."""
+    supported = [v for a in adapters for v in a.supported_variables()]
+    if requested is None:
+        return list(dict.fromkeys(supported))
+    missing = [v for v in requested if v not in supported]
+    if missing:
+        found = ", ".join(f"{a.name} ({', '.join(a.supported_variables())})" for a in adapters)
+        raise DiscoveryError(f"No model found in the input can produce: {', '.join(missing)}. "
+                             f"Found: {found}")
+    return list(requested)
+
+
+def _model_groups(datasets: list[ModelDataset]) -> list[list[ModelDataset]]:
+    """Datasets grouped by model, in order of first appearance."""
+    groups: dict[str, list[ModelDataset]] = {}
+    for d in datasets:
+        groups.setdefault(d.model, []).append(d)
+    return list(groups.values())
 
 
 def check_field(fld: FieldResult, var: VariableDefinition) -> None:
@@ -440,5 +508,7 @@ def _titles(ds: ModelDataset, fld: FieldResult, long_name: str, units: str) -> t
     if ds.reference_time:
         lead = (valid - ds.reference_time).total_seconds() / 3600.0
         sub += f"  |  init {ds.reference_time:%Y-%m-%d %H:%M} UTC (+{lead:g} h)"
-    sub += f"  |  {ds.model} run {ds.run_name}, {ds.dataset_id}"
+    sub += f"  |  {ds.model} run {ds.run_name}"
+    if ds.dataset_id != ds.model:  # e.g. ", d01" for WRF; nothing extra for DWM
+        sub += f", {ds.dataset_id}"
     return title, sub

@@ -235,7 +235,8 @@ class CatalogBuilder:
         bboxes = [ds_bboxes[0]] if len(ds_bboxes) == 1 else (
             [_union_bbox(ds_bboxes)] + ds_bboxes)
         times = sorted(t for d in datasets for t in d.valid_times)
-        model = datasets[0].model
+        models = list(dict.fromkeys(d.model for d in datasets))  # e.g. ["WRF", "DWM"]
+        model = " + ".join(models)
         parent = min(datasets, key=lambda d: d.dataset_id)
 
         domains = []
@@ -243,6 +244,7 @@ class CatalogBuilder:
             g = d.grid
             domains.append({
                 "id": d.dataset_id,
+                "model": d.model,
                 "title": d.title,
                 "grid": g.description,
                 "shape": [g.height, g.width],
@@ -257,11 +259,14 @@ class CatalogBuilder:
                 **({"moving": True, "n_positions": len(d.distinct_grids())} if d.moving else {}),
             })
 
-        # Run-level metadata: attributes identical across all domains.
-        shared = {
-            k: v for k, v in parent.metadata.items()
-            if all(d.metadata.get(k) == v for d in datasets)
-        }
+        # Run-level metadata: per model, the attributes identical across that
+        # model's domains (keys are namespaced, e.g. wrf:*, dwm:*).
+        shared: dict[str, Any] = {}
+        for m in models:
+            group = [d for d in datasets if d.model == m]
+            first = min(group, key=lambda d: d.dataset_id)
+            shared.update({k: v for k, v in first.metadata.items()
+                           if all(d.metadata.get(k) == v for d in group)})
         extra: dict[str, Any] = {
             "modelatlasify:model": model,
             "modelatlasify:version": __version__,
@@ -292,7 +297,7 @@ class CatalogBuilder:
                 pystac.TemporalExtent([[times[0], times[-1]]]),
             ),
             license="other",
-            keywords=[model, "numerical weather prediction", "model output",
+            keywords=[*models, "numerical weather prediction", "model output",
                       *[get_variable(v).long_name.lower() for v in variables]],
             extra_fields=extra,
             summaries=pystac.Summaries({"modelatlasify:dataset": [d.dataset_id for d in datasets]}),

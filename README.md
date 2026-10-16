@@ -13,8 +13,9 @@ to plot it. STAC is the interoperability layer: anything that reads STAC
 (QGIS, pystac-client, stac-browser, odc-stac, ...) can find and load the
 products.
 
-This repository is the **first working vertical slice**: WRF atmosphere-only
-output, two variables, run from the command line.
+This repository is an early working version: WRF atmosphere output and DWM
+wave model output (on its own or coupled, e.g. UWIN-CM), run from the command
+line.
 
 ## Current capabilities
 
@@ -27,10 +28,18 @@ output, two variables, run from the command line.
   `proj:*` fields, and the composite maps. Interval precipitation is
   differenced at the same location, not the same array index. Cells that
   entered the nest during the interval are missing.
+- **DWM** (Donelan Wave Model, formerly UMWM) wave model output
+  (`output/umwmout_<YYYY-MM-DD_HH:MM:SS>[.nc]`; the files keep the old name), on
+  its own or inside a coupled run directory. It is used automatically whenever
+  that output exists. Valid times come from the file names. The grid is
+  recovered from the files' lon/lat (Mercator), and the start time comes from
+  `namelists/main.nml` when present.
 - **Surface wind speed** (10 m), in m s-1
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration
   - accumulated over each output interval
+- **Waves** (DWM): significant wave height (m), mean wave period (s), dominant
+  wave period (s). Land is missing.
 - **GeoTIFF** output (COG, float32, NaN nodata, CRS + affine transform, units and
   provenance tags)
 - **PNG maps** in the native projection
@@ -66,7 +75,7 @@ pixi run modelatlasify /data/wrf/run01 --output ./atlas -np 8
 ```
 
 ```text
-ModelAtlasify 0.1.0: WRF -> /home/me/atlas
+ModelAtlasify 0.1.0: all models found -> /home/me/atlas
 Variables: surface_wind_speed, precipitation, precipitation_interval (8 processes)
 Found WRF run 'data/wrf/run01' in /data/wrf/run01:
   d01: 25 file(s), 25 time(s) 2026-10-06 00:00 -> 2026-10-07 00:00 UTC, 1649x699 grid, georeference fit error 2.4 m.
@@ -115,6 +124,10 @@ in black. A nest is overlaid only when its product covers the same period as
 d01's (e.g. not when it started accumulating precipitation later). Otherwise
 only its outline is drawn.
 
+Each model gets its own composites in the same folders: wave maps (e.g.
+`model-images/full/significant_wave_height/`) cover the wave model's domain, not
+the atmosphere's, and its domain edge is drawn as a dashed black line.
+
 With `--plot-sub-areas`, the same composites are also made for named lon/lat
 boxes, drawn in PlateCarree (regular lat/lon). Each cell is drawn at its true
 position and shape, with no resampling, so a nest keeps its full detail when
@@ -134,7 +147,7 @@ upload the whole `atlas/` directory as is.
 ### Options
 
 ```text
-modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitation]
+modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables wind,precipitation,waves]
               [--domains d01,d02] [--cut-dirs N] [-np N] [--no-plots] [--no-validate] [-v]
               [--plot-sub-areas NAME,LON1,LON2,LAT1,LAT2[,NAME,...]] [--no-full-plots]
 ```
@@ -143,9 +156,10 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--variables wind,precipitat
 |---|---|
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
-| `--variables` | `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), or exact names such as `precipitation_interval`. |
-| `--domains` | Only process these WRF domains. |
-| `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01`. |
+| `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf` or `dwm` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. |
+| `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
+| `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
 | `--no-plots` | Skip PNG maps, including the composite maps (much faster for large domains). |
 | `--plot-sub-areas` | Extra composite maps of lon/lat boxes, as groups of five values: `NAME,LON1,LON2,LAT1,LAT2`. Names may use letters, digits, `_` and `-`; `full` is reserved. Longitudes may be in -180..180 or 0..360. The box runs east from LON1 to LON2, so LON2 < LON1 crosses the antimeridian. Ignored with `--no-plots`. |
@@ -168,14 +182,18 @@ src/modelatlasify/
 │   ├── validation.py         link checks + STAC JSON-schema validation
 │   └── errors.py             user-facing exceptions
 ├── models/
-│   └── wrf/
-│       ├── adapter.py        WRFAdapter: discovery, metadata, WRF variable recipes
-│       └── projection.py     WRF MAP_PROJ → CRS + affine transform
+│   ├── wrf/
+│   │   ├── adapter.py        WRFAdapter: discovery, metadata, WRF variable recipes
+│   │   └── projection.py     WRF MAP_PROJ → CRS + affine transform
+│   └── dwm/
+│       └── adapter.py        DWMAdapter: output/umwmout_* discovery, grid fit, wave fields
 ├── variables/
 │   ├── wind.py               surface_wind_speed definition; wind_speed(), destagger()
-│   └── precipitation.py      precipitation definitions; interval_precipitation()
+│   ├── precipitation.py      precipitation definitions; interval_precipitation()
+│   └── waves.py              significant wave height, mean/dominant wave period
 ├── geospatial/
 │   ├── geotiff.py            COG writer
+│   ├── gridfit.py            regular grid (CRS + transform) from 2-D lon/lat
 │   └── footprint.py          lon/lat footprint + bbox (antimeridian/pole aware)
 └── plotting/
     └── maps.py               cartopy maps in the native projection

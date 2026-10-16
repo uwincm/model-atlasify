@@ -22,3 +22,9 @@ class FieldQualityError(ModelAtlasifyError):
 
     The pipeline skips such products and records why, instead of publishing them.
     """
+
+
+class NoModelOutputError(DiscoveryError):
+    """A directory has no output files of a particular model at all (as opposed
+    to having files that are unusable). With automatic model detection this
+    just means that model was not run."""

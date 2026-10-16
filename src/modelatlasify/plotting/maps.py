@@ -122,20 +122,24 @@ def plot_field(
 def plot_composite(
     path: Path, base: tuple[np.ndarray, GridDefinition],
     nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
-    title: str, subtitle: str = "", area: SubArea | None = None, dpi: int = 110,
+    title: str, subtitle: str = "", area: SubArea | None = None, domain_edge: bool = False,
+    dpi: int = 110,
 ) -> Path:
     """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
     grids drawn on top (finest last) and their boundaries outlined in black. A
-    nest with ``data=None`` is drawn as an outline only."""
+    nest with ``data=None`` is drawn as an outline only. ``domain_edge`` also
+    outlines the base grid itself, dashed."""
     view = full_view(base[1]) if area is None else subarea_view(area)
     return _draw_map(path, view, [base, *nests], variable, title, subtitle,
-                     outlines=[g for _, g in nests], dpi=dpi)
+                     outlines=[g for _, g in nests],
+                     dashed_outlines=[base[1]] if domain_edge else [], dpi=dpi)
 
 
 def _draw_map(
     path: Path, view: MapView, layers: list[tuple[np.ndarray | None, GridDefinition]],
     variable: VariableDefinition, title: str, subtitle: str = "",
-    outlines: list[GridDefinition] = (), dpi: int = 110,
+    outlines: list[GridDefinition] = (), dashed_outlines: list[GridDefinition] = (),
+    dpi: int = 110,
 ) -> Path:
     """Draw ``layers`` (coarsest first) in ``view``."""
     proj = view.projection
@@ -176,9 +180,11 @@ def _draw_map(
     if img is None:  # nothing in view; keep the colour bar
         img = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     _add_geography(ax, extent_m=view.extent_m)
-    for grid in outlines:
-        bx, by = _to_view(view, grid.crs, *_boundary_points(grid))
-        ax.plot(bx, by, color="black", linewidth=1.2, transform=proj, zorder=3)
+    for grids, style in ((outlines, "-"), (dashed_outlines, (0, (6, 4)))):
+        for grid in grids:
+            bx, by = _to_view(view, grid.crs, *_boundary_points(grid))
+            ax.plot(bx, by, color="black", linewidth=1.2, linestyle=style, transform=proj,
+                    zorder=3)
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
         gl.top_labels = False
