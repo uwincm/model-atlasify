@@ -11,7 +11,11 @@ def get_adapter(name: str) -> ModelAdapter:
         from modelatlasify.models.wrf import WRFAdapter
 
         return WRFAdapter()
-    raise KeyError(f"Unknown model '{name}'. Available: wrf")
+    if key in ("dwm", "umwm"):  # UMWM is DWM's former name
+        from modelatlasify.models.dwm import DWMAdapter
+
+        return DWMAdapter()
+    raise KeyError(f"Unknown model '{name}'. Available: {', '.join(AVAILABLE_MODELS)}")
 
 
-AVAILABLE_MODELS = ("wrf",)
+AVAILABLE_MODELS = ("wrf", "dwm")

@@ -33,7 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Example: modelatlasify /data/wrf/run01 --output ./atlas\n"
-            f"Variables: {var_help}. Aliases: wind, precipitation (= accumulated + interval)."
+            f"Variables: {var_help}. Aliases: wind, precipitation (= accumulated + interval), "
+            "waves (= swh + mwp + dwp)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -41,10 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="directory containing model output (e.g. wrfout_d01_* files)")
     p.add_argument("-o", "--output", type=Path, default=Path("atlas"),
                    help="output directory for the catalog and assets (default: ./atlas)")
-    p.add_argument("--model", default="wrf", choices=AVAILABLE_MODELS,
-                   help="model adapter to use (default: wrf)")
-    p.add_argument("--variables", default="wind,precipitation",
-                   help="comma-separated variables to generate (default: wind,precipitation)")
+    p.add_argument("--model", default="auto", type=str.lower,
+                   choices=("auto", *AVAILABLE_MODELS, "umwm"),
+                   help="model output to look for; 'auto' (default) uses every model found in "
+                        "each INPUT_DIR, e.g. WRF plus the DWM wave model under output/")
+    p.add_argument("--variables", default=None,
+                   help="comma-separated variables to generate (default: everything the "
+                        "models found can produce)")
     p.add_argument("--domains", default=None,
                    help="comma-separated domains to process, e.g. d01 (default: all)")
     p.add_argument("--cut-dirs", type=int, default=0, metavar="N",
@@ -102,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger("modelatlasify.models").setLevel(logging.ERROR)
 
     try:
-        variables = resolve_names(args.variables.split(","))
+        variables = resolve_names(args.variables.split(",")) if args.variables else None
     except KeyError as exc:
         _status(f"error: {exc.args[0]}")
         return 2
@@ -122,8 +126,9 @@ def main(argv: list[str] | None = None) -> int:
         plots=args.plots, domains=domains, processes=args.processes, sub_areas=sub_areas,
         full_plots=args.full_plots, cut_dirs=args.cut_dirs,
     )
-    _status(f"ModelAtlasify {__version__}: {args.model.upper()} -> {args.output.resolve()}")
-    _status(f"Variables: {', '.join(variables)}"
+    models = "all models found" if args.model == "auto" else args.model.upper()
+    _status(f"ModelAtlasify {__version__}: {models} -> {args.output.resolve()}")
+    _status(f"Variables: {', '.join(variables) if variables else 'all available'}"
             + (f" ({args.processes} processes)" if args.processes > 1 else ""))
     if sub_areas:
         _status("Sub-areas: " + ", ".join(a.name for a in sub_areas)

@@ -160,6 +160,8 @@ class ModelAdapter(abc.ABC):
 
     #: Short model name, e.g. "WRF".
     name: str = ""
+    #: Draw this model's outermost domain edge (dashed) on composite maps.
+    outline_domain_edge: bool = False
 
     @abc.abstractmethod
     def discover(self, directory: Path) -> list[ModelDataset]:

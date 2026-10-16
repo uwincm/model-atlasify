@@ -20,7 +20,7 @@ import netCDF4
 import numpy as np
 
 from modelatlasify.core.errors import (DiscoveryError, FieldQualityError, GeoreferenceError,
-                                       VariableUnavailableError)
+                                       NoModelOutputError, VariableUnavailableError)
 from modelatlasify.core.model import FieldResult, GridDefinition, ModelAdapter, ModelDataset, shift_to_grid
 from modelatlasify.models.wrf.projection import MAP_PROJ_NAMES, wrf_grid
 from modelatlasify.variables.precipitation import NEGATIVE_TOLERANCE_MM, interval_precipitation
@@ -199,7 +199,7 @@ class WRFAdapter(ModelAdapter):
             p for p in directory.iterdir() if p.is_file() and WRFOUT_PATTERN.match(p.name)
         )
         if not candidates:
-            raise DiscoveryError(
+            raise NoModelOutputError(
                 f"No WRF output files (wrfout_d<NN>_<YYYY-MM-DD_HH:MM:SS>) found in {directory}"
             )
 
