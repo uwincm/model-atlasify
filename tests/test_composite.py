@@ -21,7 +21,40 @@ def test_composite_maps_with_nest(tmp_path):
     for p in pngs:
         var, name = p.split("/")
         assert name.startswith(f"uwincm.full.{var}.")
+    for var_dir in (d for d in images.iterdir() if d.is_dir()):
+        frames = _animation_frames(images / f"{var_dir.name}.html")
+        assert [f["src"] for f in frames] == sorted(
+            f"{var_dir.name}/{p.name}" for p in var_dir.glob("*.png"))
+        assert all((images / f["src"]).is_file() for f in frames)
+    frames = _animation_frames(images / "precipitation.html")
+    assert [f["label"] for f in frames] == ["2026-10-06 00:00 UTC", "2026-10-06 01:00 UTC",
+                                            "2026-10-06 02:00 UTC"]
     assert validate_catalog(out / "catalog.json", schemas=False).ok
+
+
+def _animation_frames(page):
+    import json
+    import re
+
+    m = re.search(r"const FRAMES = (.*?);\n", page.read_text(encoding="utf-8"), flags=re.DOTALL)
+    return json.loads(m[1].replace("<\\/", "</"))
+
+
+def test_animation_page(tmp_path):
+    import modelatlasify.variables  # noqa: F401 - registers the long names
+    from modelatlasify.plotting.animation import write_animation
+
+    var_dir = tmp_path / "run" / "model-images" / "full" / "surface_wind_speed"
+    var_dir.mkdir(parents=True)
+    assert write_animation(var_dir) is None  # no frames
+    (var_dir / "uwincm.full.surface_wind_speed.20261006T010000Z.png").write_bytes(b"")
+    page = write_animation(var_dir)
+    assert page == var_dir.parent / "surface_wind_speed.html"
+    (var_dir / "uwincm.full.surface_wind_speed.20261006T000000Z.png").write_bytes(b"")
+    assert write_animation(var_dir) == page  # rewritten with the new frame
+    assert [f["label"] for f in _animation_frames(page)] == ["2026-10-06 00:00 UTC",
+                                                             "2026-10-06 01:00 UTC"]
+    assert "<title>Surface wind speed — full — run</title>" in page.read_text(encoding="utf-8")
 
 
 def test_mercator_nest_is_placed_without_resampling(tmp_path):
@@ -48,8 +81,55 @@ def test_sub_area_maps(tmp_path, capsys):
     assert zoom == ["uwincm.zoom.surface_wind_speed.20261006T000000Z.png",
                     "uwincm.zoom.surface_wind_speed.20261006T010000Z.png"]
     assert len(list(images.glob("full/*/*.png"))) == 2
+    assert (images / "zoom" / "surface_wind_speed.html").is_file()
     assert not (images / "away").exists()
+    assert not (images / "away.html").exists()
     assert "sub-area 'away' is entirely outside" in capsys.readouterr().err
+
+    summary = images.parent / "model-images.html"
+    text = summary.read_text(encoding="utf-8")
+    assert text.index('<th scope="col">full</th>') < text.index('<th scope="col">zoom</th>')
+    assert ('<a href="model-images/zoom/surface_wind_speed.html"' in text
+            and 'src="model-images/zoom/surface_wind_speed/'
+                'uwincm.zoom.surface_wind_speed.20261006T010000Z.png"' in text)  # latest frame
+    for ref in _summary_links(text):
+        assert (images.parent / ref).is_file(), ref
+
+
+def _summary_links(text):
+    import re
+
+    return re.findall(r'(?:href|src)="([^"]+)"', text)
+
+
+def test_summary_table(tmp_path):
+    import modelatlasify.variables  # noqa: F401 - registers the variable order and names
+    from modelatlasify.core.variables import all_variables
+    from modelatlasify.plotting.animation import write_summary
+
+    images = tmp_path / "run" / "model-images"
+    assert write_summary(images) is None  # no maps yet
+    for area, var in [("gulf", "precipitation"), ("full", "surface_wind_speed"),
+                      ("full", "precipitation")]:
+        (images / area / var).mkdir(parents=True)
+        for h in ("00", "01"):
+            (images / area / var / f"uwincm.{area}.{var}.20261006T{h}0000Z.png").write_bytes(b"")
+    page = write_summary(images)
+    assert page == tmp_path / "run" / "model-images.html"
+    text = page.read_text(encoding="utf-8")
+    rows = text.split("<tr>")[1:]
+    assert [r.count("<th") for r in rows] == [3, 1, 1]  # corner + 2 areas; row headings
+    assert "full" in rows[0].split("gulf")[0]  # full is the first column
+    # Rows follow the registered variable order.
+    order = list(all_variables())
+    expected = sorted(["precipitation", "surface_wind_speed"], key=order.index)
+    assert [r.split('class="code">')[1].split("<")[0] for r in rows[1:]] == expected
+    by_var = dict(zip(expected, rows[1:]))
+    assert 'class="none"' in by_var["surface_wind_speed"]  # no gulf wind map
+    assert 'class="none"' not in by_var["precipitation"]
+    assert 'width="300"' in by_var["precipitation"]
+    assert "20261006T010000Z.png" in by_var["precipitation"]
+    assert "20261006T000000Z.png" not in text  # only the latest frame is shown
 
 
 def test_crop_window_and_overlap():

@@ -3,7 +3,9 @@
 Valid times are processed independently (compute, GeoTIFF, map), optionally in
 a pool of worker processes; the STAC catalog is assembled in the main process.
 With plots on, each run then also gets composite maps (the outermost domain
-with its nests overlaid) under ``<run>/model-images/``, outside the catalog.
+with its nests overlaid) under ``<run>/model-images/``, outside the catalog,
+a looping HTML animation of each area's maps of each variable, and a
+``<run>/model-images.html`` table linking to them.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ class PipelineResult:
     n_geotiffs: int
     n_plots: int
     n_composites: int
+    n_animations: int
     skipped_files: list[tuple[Path, str]]
     quality_skips: list[str]
     seconds: float
@@ -392,7 +395,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
             mapper_composite = lambda tasks: map(_plot_composite, tasks)  # noqa: E731
 
         builder = CatalogBuilder(options.output)
-        n_items = n_tif = n_png = n_comp = 0
+        n_items = n_tif = n_png = n_comp = n_anim = 0
         quality_skips: list[str] = []
         for run_id, datasets in runs.items():
             items = []
@@ -432,6 +435,13 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                               desc=f"{datasets[0].run_name} composite maps", unit="map", file=sys.stderr,
                               disable=not progress):
                     n_comp += 1
+                from modelatlasify.plotting.animation import write_animation, write_summary
+
+                for var_dir in sorted({t.path.parent for t in tasks}):
+                    if write_animation(var_dir) is not None:
+                        n_anim += 1
+                for images_dir in sorted({t.path.parents[2] for t in tasks}):
+                    write_summary(images_dir)
             builder.add_run(run_id, datasets, items,
                             [v for v in variables if any(v in adapters[d.model].supported_variables()
                                                          for d in datasets)])
@@ -449,6 +459,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
         catalog_path=catalog_path,
         datasets=[d for ds in runs.values() for d in ds],
         n_items=n_items, n_geotiffs=n_tif, n_plots=n_png, n_composites=n_comp,
+        n_animations=n_anim,
         skipped_files=skipped, quality_skips=quality_skips, seconds=time.monotonic() - t0,
     )
 

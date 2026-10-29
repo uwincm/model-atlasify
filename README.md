@@ -95,8 +95,10 @@ atlas/
 └── data/wrf/run01/                           # one directory per model run (mirrors the input path)
     ├── collection.json                       # STAC Collection: the run
     ├── command-used.20261012T153045Z.txt     # the exact command, one file per invocation
+    ├── model-images.html                     # table of latest maps, linking to the animations
     ├── model-images/                         # composite maps (not in the STAC catalog)
     │   ├── full/                             # plot area: the whole outermost domain
+    │   │   ├── precipitation.html            # animation of precipitation/ (open in a browser)
     │   │   ├── precipitation/
     │   │   │   └── uwincm.full.precipitation.20261006T010000Z.png
     │   │   ├── precipitation_interval/
@@ -123,6 +125,14 @@ nested domains (d02, d03, ...) drawn on top at their own resolution and outlined
 in black. A nest is overlaid only when its product covers the same period as
 d01's (e.g. not when it started accumulating precipitation later). Otherwise
 only its outline is drawn.
+
+Next to each variable's folder, `<variable>.html` (e.g.
+`model-images/full/surface_wind_speed.html`) plays that folder's maps as a
+looping animation, with play/pause, step and speed controls and a time slider.
+`model-images.html`, next to `model-images/`, is the place to start: a table
+with one row per variable and one column per plot area, showing the latest map
+of each. Click a map to open its animation. These pages are self-contained, so
+they work when opened straight from disk.
 
 Each model gets its own composites in the same folders: wave maps (e.g.
 `model-images/full/significant_wave_height/`) cover the wave model's domain, not

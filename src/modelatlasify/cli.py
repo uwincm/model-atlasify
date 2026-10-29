@@ -147,8 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         if len(result.quality_skips) > 10:
             _status(f"  ... and {len(result.quality_skips) - 10} more")
     _status(f"Generated {result.n_items} STAC items, {result.n_geotiffs} GeoTIFFs, "
-            f"{result.n_plots} maps, {result.n_composites} composite maps "
-            f"in {result.seconds:.0f} s.")
+            f"{result.n_plots} maps, {result.n_composites} composite maps, "
+            f"{result.n_animations} animations in {result.seconds:.0f} s.")
     for run_path in dict.fromkeys(d.run_path for d in result.datasets):
         write_command_record(result.catalog_path.parent / run_path, argv, started)
     _status("Checking catalog links" + (" and validating STAC schemas..." if args.validate else "..."))
