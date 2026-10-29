@@ -84,8 +84,10 @@ def test_waves_only_run(tmp_path):
     with rasterio.open(items[0] / "significant_wave_height.tif") as src:
         assert "Mercator" in src.crs.to_wkt() and np.isnan(src.read(1)[-1, 0])
     full = run_dir / "model-images" / "full"
-    assert sorted(p.name for p in full.iterdir()) == [
+    assert sorted(p.name for p in full.iterdir() if p.is_dir()) == [
         "dominant_wave_period", "mean_wave_period", "significant_wave_height"]
+    assert sorted(p.name for p in full.glob("*.html")) == [
+        "dominant_wave_period.html", "mean_wave_period.html", "significant_wave_height.html"]
     assert len(list(full.rglob("*.png"))) == 6
     collection = json.loads((run_dir / "collection.json").read_text())
     assert collection["title"] == "DWM run waverun"
@@ -105,7 +107,7 @@ def test_coupled_run_with_wrf_and_waves(tmp_path, capsys):
     assert {p.name.split("-")[0] for p in (run_dir / "items").iterdir()} == {"d01", "DWM"}
     assert not list(run_dir.glob("items/DWM-*/surface_wind_speed.tif"))  # each model its own
     for area in ("full", "box"):
-        names = {p.name for p in (run_dir / "model-images" / area).iterdir()}
+        names = {p.name for p in (run_dir / "model-images" / area).iterdir() if p.is_dir()}
         assert names == {"surface_wind_speed", "significant_wave_height", "mean_wave_period",
                          "dominant_wave_period"}
     collection = json.loads((run_dir / "collection.json").read_text())

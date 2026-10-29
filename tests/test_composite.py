@@ -21,7 +21,40 @@ def test_composite_maps_with_nest(tmp_path):
     for p in pngs:
         var, name = p.split("/")
         assert name.startswith(f"uwincm.full.{var}.")
+    for var_dir in (d for d in images.iterdir() if d.is_dir()):
+        frames = _animation_frames(images / f"{var_dir.name}.html")
+        assert [f["src"] for f in frames] == sorted(
+            f"{var_dir.name}/{p.name}" for p in var_dir.glob("*.png"))
+        assert all((images / f["src"]).is_file() for f in frames)
+    frames = _animation_frames(images / "precipitation.html")
+    assert [f["label"] for f in frames] == ["2026-10-06 00:00 UTC", "2026-10-06 01:00 UTC",
+                                            "2026-10-06 02:00 UTC"]
     assert validate_catalog(out / "catalog.json", schemas=False).ok
+
+
+def _animation_frames(page):
+    import json
+    import re
+
+    m = re.search(r"const FRAMES = (.*?);\n", page.read_text(encoding="utf-8"), flags=re.DOTALL)
+    return json.loads(m[1].replace("<\\/", "</"))
+
+
+def test_animation_page(tmp_path):
+    import modelatlasify.variables  # noqa: F401 - registers the long names
+    from modelatlasify.plotting.animation import write_animation
+
+    var_dir = tmp_path / "run" / "model-images" / "full" / "surface_wind_speed"
+    var_dir.mkdir(parents=True)
+    assert write_animation(var_dir) is None  # no frames
+    (var_dir / "uwincm.full.surface_wind_speed.20261006T010000Z.png").write_bytes(b"")
+    page = write_animation(var_dir)
+    assert page == var_dir.parent / "surface_wind_speed.html"
+    (var_dir / "uwincm.full.surface_wind_speed.20261006T000000Z.png").write_bytes(b"")
+    assert write_animation(var_dir) == page  # rewritten with the new frame
+    assert [f["label"] for f in _animation_frames(page)] == ["2026-10-06 00:00 UTC",
+                                                             "2026-10-06 01:00 UTC"]
+    assert "<title>Surface wind speed — full — run</title>" in page.read_text(encoding="utf-8")
 
 
 def test_mercator_nest_is_placed_without_resampling(tmp_path):
@@ -48,7 +81,9 @@ def test_sub_area_maps(tmp_path, capsys):
     assert zoom == ["uwincm.zoom.surface_wind_speed.20261006T000000Z.png",
                     "uwincm.zoom.surface_wind_speed.20261006T010000Z.png"]
     assert len(list(images.glob("full/*/*.png"))) == 2
+    assert (images / "zoom" / "surface_wind_speed.html").is_file()
     assert not (images / "away").exists()
+    assert not (images / "away.html").exists()
     assert "sub-area 'away' is entirely outside" in capsys.readouterr().err
 
 
