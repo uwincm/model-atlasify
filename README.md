@@ -134,6 +134,12 @@ with one row per variable and one column per plot area, showing the latest map
 of each. Click a map to open its animation. These pages are self-contained, so
 they work when opened straight from disk.
 
+![model-images.html for a UWIN-CM run: latest map of each variable (rows) in each plot area (columns)](docs/images/model-images-summary.png)
+
+*`model-images.html` for a coupled WRF + DWM (UWIN-CM) run, with the whole
+domain (`full`) and a `--plot-sub-areas` box (`tepex`).
+[Live example](https://orca.atmos.washington.edu/~bkerns/atlas/home/disk/orca/ckub/models/uwincm/run_2023mar_waves_v4/model-images.html).*
+
 Each model gets its own composites in the same folders: wave maps (e.g.
 `model-images/full/significant_wave_height/`) cover the wave model's domain, not
 the atmosphere's, and its domain edge is drawn as a dashed black line.
