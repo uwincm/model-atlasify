@@ -542,7 +542,12 @@ class WRFAdapter(ModelAdapter):
         """Run the accumulation check for every time, in order (each check
         compares with the previous valid time, so in-order evaluation recurses
         only one level), and keep the results in the dataset's state."""
-        if not {"precipitation", "precipitation_interval"} & set(variables):
+        # Interval precipitation from PREC_ACC_* needs no accumulation check.
+        needs_check = "precipitation" in variables or (
+            "precipitation_interval" in variables
+            and any(self._prec_acc_dt(dataset, t) is None for t in range(len(dataset.valid_times)))
+        )
+        if not needs_check:
             return
         state = dataset.adapter_state
         if state.accumulation_problems is None:
@@ -562,7 +567,75 @@ class WRFAdapter(ModelAdapter):
         including files that were present but unusable."""
         return dataset.adapter_state.output_interval
 
+    def _prec_acc_dt(self, dataset, t) -> float | None:
+        """PREC_ACC_DT (minutes) of the file holding time t, or None if that
+        file does not have usable PREC_ACC_C/PREC_ACC_NC (variables missing,
+        or PREC_ACC_DT absent or <= 0, i.e. the accumulation is switched off)."""
+        if not (self._has(dataset, t, "PREC_ACC_C") and self._has(dataset, t, "PREC_ACC_NC")):
+            return None
+        nc = self._open(dataset.adapter_state.slots[t].path)
+        if "PREC_ACC_DT" not in nc.ncattrs():
+            return None
+        prec_acc_dt_minutes = float(nc.getncattr("PREC_ACC_DT"))
+        return prec_acc_dt_minutes if prec_acc_dt_minutes > 0 else None
+
     def _interval_precip(self, dataset, t):
+        """Interval precipitation at output time t.
+
+        Uses WRF's PREC_ACC_C + PREC_ACC_NC (precipitation over the last
+        PREC_ACC_DT minutes) when the output has them, scaled to an hourly
+        equivalent; otherwise the difference of the accumulated totals at
+        t-1 and t (see :meth:`_differenced_interval_precip`).
+        """
+        prec_acc_dt = self._prec_acc_dt(dataset, t)
+        if prec_acc_dt is not None:
+            return self._prec_acc_interval_precip(dataset, t, prec_acc_dt)
+        return self._differenced_interval_precip(dataset, t)
+
+    def _prec_acc_interval_precip(self, dataset, t, prec_acc_dt):
+        """Hourly-equivalent precipitation from PREC_ACC_C + PREC_ACC_NC.
+
+        WRF zeroes these every PREC_ACC_DT minutes from the start of the
+        accumulation, so at an output time on that cycle they hold the
+        precipitation of the preceding PREC_ACC_DT minutes. Output times off
+        the cycle hold a partial window and are skipped.
+        """
+        end = dataset.valid_times[t]
+        window = timedelta(minutes=prec_acc_dt)
+        acc_start = dataset.adapter_state.accumulation_start
+        if acc_start is not None:
+            if end <= acc_start:
+                return None  # nothing accumulated yet
+            if (end - acc_start) % window:
+                log.info(
+                    "%s %s: not on the PREC_ACC_DT=%g min accumulation cycle; "
+                    "skipping interval precipitation.",
+                    dataset.dataset_id, end.isoformat(), prec_acc_dt,
+                )
+                return None
+        components = ["PREC_ACC_C", "PREC_ACC_NC"]
+        for name in components:
+            units = self._units(dataset, t, name)
+            if units.lower() != "mm":
+                raise VariableUnavailableError(
+                    f"{name} has units '{units}', expected 'mm'; refusing to guess a conversion."
+                )
+        scale = 60.0 / prec_acc_dt
+        amount = sum(self._read_2d(dataset, t, n) for n in components) * scale
+        return FieldResult(
+            "precipitation_interval", amount[::-1].copy(), end,
+            start_time=end - window, end_time=end,
+            provenance={
+                "source_variables": components,
+                "method": f"(PREC_ACC_C + PREC_ACC_NC) * 60 / PREC_ACC_DT; "
+                f"precipitation over the {prec_acc_dt:g} min ending at the valid time, "
+                "scaled to an hourly equivalent",
+                "prec_acc_dt_minutes": prec_acc_dt,
+                "hourly_equivalent_scale": scale,
+            },
+        )
+
+    def _differenced_interval_precip(self, dataset, t):
         """Precipitation between output time t-1 and t.
 
         Only computed when the two times are consecutive outputs, i.e. their
