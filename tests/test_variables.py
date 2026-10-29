@@ -91,6 +91,52 @@ def test_interval_precipitation_skipped_across_gap(tmp_path):
     assert adapter.compute(ds, "precipitation_interval", 3) is not None
 
 
+def test_interval_precipitation_from_prec_acc(tmp_path):
+    write_wrfout(tmp_path / "r", hourly(T0, 4), prec_acc_dt=60.0,
+                 include=("U10", "V10"))  # no RAINC/RAINNC: PREC_ACC alone suffices
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    adapter.prepare(ds, ["precipitation_interval"])  # no accumulation check needed
+    assert adapter.compute(ds, "precipitation_interval", 0) is None
+    f = adapter.compute(ds, "precipitation_interval", 2)
+    nx = ds.grid.width
+    expected = 0.5 + 1.0 * (1 + np.arange(nx) / nx)
+    np.testing.assert_allclose(f.data, np.broadcast_to(expected, f.data.shape), rtol=1e-5)
+    assert f.start_time == T0 + timedelta(hours=1)
+    assert f.end_time == T0 + timedelta(hours=2)
+    assert f.provenance["source_variables"] == ["PREC_ACC_C", "PREC_ACC_NC"]
+
+
+def test_prec_acc_is_scaled_to_hourly(tmp_path):
+    times = hourly(T0, 5, step_hours=0.25)
+    write_wrfout(tmp_path / "r", times, prec_acc_dt=15.0)
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    f = adapter.compute(ds, "precipitation_interval", 3)
+    nx = ds.grid.width
+    expected = 0.5 + 1.0 * (1 + np.arange(nx) / nx)  # 15 min of rain * 4
+    np.testing.assert_allclose(f.data, np.broadcast_to(expected, f.data.shape), rtol=1e-5)
+    assert f.start_time == times[3] - timedelta(minutes=15)
+    assert f.provenance["hourly_equivalent_scale"] == 4.0
+
+
+def test_prec_acc_off_cycle_times_are_skipped(tmp_path):
+    times = hourly(T0, 5, step_hours=0.5)
+    write_wrfout(tmp_path / "r", times, prec_acc_dt=60.0)
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    assert adapter.compute(ds, "precipitation_interval", 1) is None  # 00:30, partial window
+    assert adapter.compute(ds, "precipitation_interval", 2) is not None  # 01:00
+
+
+def test_prec_acc_disabled_falls_back_to_differences(tmp_path):
+    write_wrfout(tmp_path / "r", hourly(T0, 3), prec_acc_dt=0.0)
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    f = adapter.compute(ds, "precipitation_interval", 2)
+    assert f.provenance["source_variables"] == ["RAINC", "RAINNC"]
+
+
 def test_bucketed_precipitation_is_reconstructed(tmp_path):
     write_wrfout(tmp_path / "r", hourly(T0, 4), bucket_mm=1.0,
                  include=("U10", "V10", "RAINC", "RAINNC", "I_RAINC", "I_RAINNC"))

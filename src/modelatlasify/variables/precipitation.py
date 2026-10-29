@@ -71,9 +71,11 @@ PRECIPITATION_INTERVAL = register(
         standard_name="precipitation_amount",
         cell_methods="time: sum",
         description=(
-            "Total precipitation (liquid-water equivalent) that fell between the "
-            "previous output time and the valid time, computed as the difference "
-            "of consecutive accumulated totals."
+            "Total precipitation (liquid-water equivalent) over the period ending "
+            "at the valid time (see start_datetime). For WRF output with "
+            "PREC_ACC_C/PREC_ACC_NC this is their sum over the last PREC_ACC_DT "
+            "minutes, scaled to an hourly equivalent; otherwise it is the "
+            "difference of consecutive accumulated totals."
         ),
         cmap=get_colormap_precip(), #"YlGnBu",
         levels=(0.0, 0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50, 75),

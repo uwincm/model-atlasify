@@ -71,6 +71,7 @@ def write_wrfout(
     precip_rate: float = 1.0,
     corrupt_xtime: tuple[datetime, ...] = (),
     move: tuple[int, int] = (0, 0),
+    prec_acc_dt: float | None = None,
 ) -> list[Path]:
     """Write wrfout_dNN_* files. Returns paths.
 
@@ -80,6 +81,9 @@ def write_wrfout(
       RAINNC = precip_rate * hours since sim_start * (1 + i/nx);
       RAINC  = 0.5 * hours since sim_start.
 
+    ``prec_acc_dt`` (minutes) also writes PREC_ACC_C/PREC_ACC_NC: the RAINC/
+    RAINNC increase since the last multiple of PREC_ACC_DT after sim_start.
+
     ``move`` = (cols east, rows north) per output time makes a moving nest:
     the k-th time is shifted by k * move cells, and the i in the patterns
     above is the column of the *first* position's lattice, so every pattern
@@ -88,6 +92,8 @@ def write_wrfout(
     p = dict(PROJECTIONS[map_proj])
     sim_start = sim_start or times[0]
     start_date = start_date or sim_start
+    if prec_acc_dt is not None:
+        include = tuple(include) + ("PREC_ACC_C", "PREC_ACC_NC")
     directory.mkdir(parents=True, exist_ok=True)
     paths = []
     for k in range(0, len(times), times_per_file):
@@ -113,6 +119,8 @@ def write_wrfout(
                 POLE_LAT=np.float32(90.0), POLE_LON=np.float32(0.0),
             )
             attrs.update({k2: (np.float32(v) if isinstance(v, float) else v) for k2, v in p.items()})
+            if prec_acc_dt is not None:
+                attrs["PREC_ACC_DT"] = np.float32(prec_acc_dt)
             nc.setncatts(attrs)
 
             tv = nc.createVariable("Times", "S1", ("Time", "DateStrLen"))
@@ -128,7 +136,7 @@ def write_wrfout(
                     "V": ("Time", "bottom_top", "south_north_stag", "west_east"),
                 }.get(name, ("Time", "south_north", "west_east"))
                 fields[name] = nc.createVariable(name, "f4", dims)
-                fields[name].units = rain_units if name.startswith(("RAIN", "I_RAIN")) else (
+                fields[name].units = rain_units if name.startswith(("RAIN", "I_RAIN", "PREC_ACC")) else (
                     "" if name.startswith("I_") else "m s-1")
             for n, t in enumerate(chunk):
                 kk = k + n
@@ -149,6 +157,16 @@ def write_wrfout(
                     fields["V"][n] = np.broadcast_to(
                         np.arange(ny + 1, dtype=float)[:, None], (3, ny + 1, nx))
                 rainnc = precip_rate * hours * (1.0 + ii / nx)
+                if prec_acc_dt:  # 0 = switched off in WRF (fields stay 0)
+                    minutes = hours * 60.0
+                    acc_hours = (minutes - (minutes // prec_acc_dt) * prec_acc_dt) / 60.0
+                    if minutes > 0 and acc_hours == 0:
+                        acc_hours = prec_acc_dt / 60.0  # output at the end of a full window
+                    fields["PREC_ACC_NC"][n] = precip_rate * acc_hours * (1.0 + ii / nx)
+                    fields["PREC_ACC_C"][n] = np.full((ny, nx), 0.5 * acc_hours)
+                elif prec_acc_dt is not None:
+                    fields["PREC_ACC_NC"][n] = 0.0
+                    fields["PREC_ACC_C"][n] = 0.0
                 rainc = np.full((ny, nx), 0.5 * hours)
                 if bucket_mm > 0:
                     if "I_RAINNC" in fields:

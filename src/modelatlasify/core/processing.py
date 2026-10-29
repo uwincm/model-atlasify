@@ -498,8 +498,13 @@ def _titles(ds: ModelDataset, fld: FieldResult, long_name: str, units: str) -> t
     valid = fld.valid_time
     if fld.variable == "precipitation_interval" and fld.start_time:
         hours = (fld.end_time - fld.start_time).total_seconds() / 3600.0
-        title = (f"{hours:g}-h precipitation ({units}), "
-                 f"{fld.start_time:%Y-%m-%d %H:%M} to {fld.end_time:%H:%M} UTC")
+        if fld.provenance.get("hourly_equivalent_scale", 1.0) != 1.0:
+            # e.g. a 15-min PREC_ACC accumulation scaled up to mm per hour.
+            title = (f"1-h equivalent precipitation ({units}) from {60 * hours:g}-min total, "
+                     f"{fld.start_time:%Y-%m-%d %H:%M} to {fld.end_time:%H:%M} UTC")
+        else:
+            title = (f"{hours:g}-h precipitation ({units}), "
+                     f"{fld.start_time:%Y-%m-%d %H:%M} to {fld.end_time:%H:%M} UTC")
     elif fld.variable == "precipitation" and ds.reference_time:
         title = f"{long_name} since {ds.reference_time:%Y-%m-%d %H:%M} UTC ({units})"
     else:
