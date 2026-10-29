@@ -86,6 +86,51 @@ def test_sub_area_maps(tmp_path, capsys):
     assert not (images / "away.html").exists()
     assert "sub-area 'away' is entirely outside" in capsys.readouterr().err
 
+    summary = images.parent / "model-images.html"
+    text = summary.read_text(encoding="utf-8")
+    assert text.index('<th scope="col">full</th>') < text.index('<th scope="col">zoom</th>')
+    assert ('<a href="model-images/zoom/surface_wind_speed.html"' in text
+            and 'src="model-images/zoom/surface_wind_speed/'
+                'uwincm.zoom.surface_wind_speed.20261006T010000Z.png"' in text)  # latest frame
+    for ref in _summary_links(text):
+        assert (images.parent / ref).is_file(), ref
+
+
+def _summary_links(text):
+    import re
+
+    return re.findall(r'(?:href|src)="([^"]+)"', text)
+
+
+def test_summary_table(tmp_path):
+    import modelatlasify.variables  # noqa: F401 - registers the variable order and names
+    from modelatlasify.core.variables import all_variables
+    from modelatlasify.plotting.animation import write_summary
+
+    images = tmp_path / "run" / "model-images"
+    assert write_summary(images) is None  # no maps yet
+    for area, var in [("gulf", "precipitation"), ("full", "surface_wind_speed"),
+                      ("full", "precipitation")]:
+        (images / area / var).mkdir(parents=True)
+        for h in ("00", "01"):
+            (images / area / var / f"uwincm.{area}.{var}.20261006T{h}0000Z.png").write_bytes(b"")
+    page = write_summary(images)
+    assert page == tmp_path / "run" / "model-images.html"
+    text = page.read_text(encoding="utf-8")
+    rows = text.split("<tr>")[1:]
+    assert [r.count("<th") for r in rows] == [3, 1, 1]  # corner + 2 areas; row headings
+    assert "full" in rows[0].split("gulf")[0]  # full is the first column
+    # Rows follow the registered variable order.
+    order = list(all_variables())
+    expected = sorted(["precipitation", "surface_wind_speed"], key=order.index)
+    assert [r.split('class="code">')[1].split("<")[0] for r in rows[1:]] == expected
+    by_var = dict(zip(expected, rows[1:]))
+    assert 'class="none"' in by_var["surface_wind_speed"]  # no gulf wind map
+    assert 'class="none"' not in by_var["precipitation"]
+    assert 'width="300"' in by_var["precipitation"]
+    assert "20261006T010000Z.png" in by_var["precipitation"]
+    assert "20261006T000000Z.png" not in text  # only the latest frame is shown
+
 
 def test_crop_window_and_overlap():
     from modelatlasify.core.areas import SubArea

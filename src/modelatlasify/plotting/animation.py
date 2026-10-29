@@ -1,9 +1,11 @@
-"""Looping HTML animation of one variable's composite maps.
+"""HTML pages for browsing a run's composite maps.
 
 ``model-images/<area>/<variable>.html`` sits next to ``<variable>/`` and plays
-its PNGs in time order. The page is self-contained (inline CSS and
-JavaScript, frames referenced by relative path), so it works from ``file://``
-as well as from a web server.
+its PNGs in time order as a looping animation. ``model-images.html``, next to
+``model-images/``, is a table of the latest map of every variable (rows) and
+plot area (columns), each linking to its animation. The pages are
+self-contained (inline CSS and JavaScript, images referenced by relative
+path), so they work from ``file://`` as well as from a web server.
 """
 
 from __future__ import annotations
@@ -14,7 +16,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from modelatlasify.core.variables import get_variable
+from modelatlasify.core.areas import FULL_AREA
+from modelatlasify.core.variables import all_variables, get_variable
 
 #: The valid time in a composite map's file name (see composite_path).
 _TIME = re.compile(r"\.(\d{8}T\d{6}Z)\.png$")
@@ -37,10 +40,7 @@ def write_animation(var_dir: Path) -> Path | None:
     frames = sorted(var_dir.glob("*.png"))  # the time stamp in the name sorts them
     if not frames:
         return None
-    try:
-        long_name = get_variable(var_dir.name).long_name
-    except KeyError:
-        long_name = var_dir.name
+    long_name = _long_name(var_dir.name)
     area, run = var_dir.parent.name, var_dir.parent.parent.parent.name
     title = f"{long_name} — {area} — {run}"
     data = [{"src": f"{var_dir.name}/{p.name}", "label": _label(p.name)} for p in frames]
@@ -49,6 +49,103 @@ def write_animation(var_dir: Path) -> Path | None:
     path = var_dir.parent / f"{var_dir.name}.html"
     path.write_text(page, encoding="utf-8")
     return path
+
+
+def _long_name(variable: str) -> str:
+    try:
+        return get_variable(variable).long_name
+    except KeyError:
+        return variable
+
+
+def write_summary(images_dir: Path) -> Path | None:
+    """Write ``model-images.html`` next to ``images_dir`` (``<run>/model-images``).
+
+    One column per plot area (``full`` first, then the others by name), one
+    row per variable (in the order the variables are registered). Each cell
+    shows the variable's latest map in that area and links to its animation.
+    Returns the page, or None if there are no maps.
+    """
+    if not images_dir.is_dir():
+        return None
+    cells: dict[tuple[str, str], Path] = {}  # (area, variable) -> latest frame
+    for area_dir in images_dir.iterdir():
+        if not area_dir.is_dir():
+            continue
+        for var_dir in area_dir.iterdir():
+            frames = sorted(var_dir.glob("*.png")) if var_dir.is_dir() else []
+            if frames:
+                cells[(area_dir.name, var_dir.name)] = frames[-1]
+    if not cells:
+        return None
+    areas = sorted({a for a, _ in cells}, key=lambda a: (a != FULL_AREA, a))
+    order = {name: k for k, name in enumerate(all_variables())}
+    variables = sorted({v for _, v in cells}, key=lambda v: (order.get(v, len(order)), v))
+
+    esc = html.escape
+    rows = ["<tr><th></th>" + "".join(f'<th scope="col">{esc(a)}</th>' for a in areas) + "</tr>"]
+    for v in variables:
+        row = [f'<th scope="row">{esc(_long_name(v))}<span class="code">{esc(v)}</span></th>']
+        for a in areas:
+            frame = cells.get((a, v))
+            if frame is None:
+                row.append('<td class="none">&mdash;</td>')
+                continue
+            src = f"{images_dir.name}/{a}/{v}/{frame.name}"
+            row.append(
+                f'<td><a href="{esc(f"{images_dir.name}/{a}/{v}.html")}" '
+                f'title="Animate {esc(_long_name(v))} ({esc(a)})">'
+                f'<img src="{esc(src)}" width="300" alt="{esc(_long_name(v))}, {esc(a)}" '
+                f'loading="lazy"></a><div class="time">{esc(_label(frame.name))}</div></td>')
+        rows.append("<tr>" + "".join(row) + "</tr>")
+    title = f"Composite maps — {images_dir.parent.name}"
+    page = (_SUMMARY_TEMPLATE.replace("__TITLE__", esc(title))
+            .replace("__ROWS__", "\n".join(rows)))
+    path = images_dir.parent / f"{images_dir.name}.html"
+    path.write_text(page, encoding="utf-8")
+    return path
+
+
+_SUMMARY_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1d1d1f; --muted: #6b6b70; --line: #d0d0d5; --head: #f2f2f5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #18181b; --fg: #ececf0; --muted: #a0a0a8; --line: #3a3a40; --head: #26262b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--fg);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 12px; }
+  .wrap { overflow-x: auto; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid var(--line); padding: 6px; vertical-align: middle; }
+  th { background: var(--head); font-weight: 600; }
+  th[scope=row] { text-align: left; max-width: 180px; }
+  .code { display: block; color: var(--muted); font: 12px ui-monospace, monospace; font-weight: 400; }
+  td { text-align: center; }
+  td img { display: block; width: 300px; height: auto; }
+  td a:hover img { outline: 2px solid var(--muted); }
+  .time { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .none { color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>__TITLE__</h1>
+<p>Latest map of each variable in each plot area. Click a map to animate the run.</p>
+<div class="wrap">
+<table>
+__ROWS__
+</table>
+</div>
+</body>
+</html>
+"""
 
 
 _TEMPLATE = """<!doctype html>
@@ -65,7 +162,9 @@ _TEMPLATE = """<!doctype html>
   * { box-sizing: border-box; }
   body { margin: 0; padding: 12px 16px; background: var(--bg); color: var(--fg);
          font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  h1 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+  nav { margin: 0 0 8px; }
+  a { color: inherit; }
   #view { display: flex; justify-content: center; }
   #frame { max-width: 100%; max-height: calc(100vh - 150px); object-fit: contain; }
   #controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
@@ -82,6 +181,7 @@ _TEMPLATE = """<!doctype html>
 </head>
 <body>
 <h1>__TITLE__</h1>
+<nav><a href="../../model-images.html">&larr; All composite maps</a></nav>
 <div id="view"><img id="frame" alt=""></div>
 <div id="info"></div>
 <div id="controls">
