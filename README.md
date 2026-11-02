@@ -382,9 +382,9 @@ in a box around the domain's outer edge plus 1° on every side.
   (e.g. at initialization) is skipped as a failed sanity check.
 - `olr_precipitation` is a map-only product (`olr_precipitation.png`, a STAC
   `visual` asset; no GeoTIFF). It draws `olr` in reversed greyscale spread
-  over 80–300 W m-2, so cold cloud tops are white and 240 W m-2 is dark grey rather than black. OLR above
-  240 W m-2 (mostly clear sky) is drawn transparent, so the map background and
-  coastlines show through. The `precipitation_interval` product of the same
+  over 80–300 W m-2, so cold cloud tops are white and 240 W m-2 is dark grey
+  rather than black. OLR above 240 W m-2 (mostly clear sky) is drawn
+  transparent, so the map background and coastlines show through. The `precipitation_interval` product of the same
   time and domain is drawn on top, in its usual colours. Each field has its own
   colour bar.
 - At the first output time there is no interval precipitation, so the map
