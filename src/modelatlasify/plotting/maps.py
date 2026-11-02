@@ -33,6 +33,9 @@ from modelatlasify.core import storage  # noqa: E402
 from modelatlasify.core.areas import FULL_AREA, SubArea  # noqa: E402
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
 from modelatlasify.core.variables import VariableDefinition  # noqa: E402
+from modelatlasify.variables.wind import (KNOTS_PER_M_S, VECTOR_KM_PER_KNOT,  # noqa: E402
+                                          VECTOR_MAX_KNOTS, VECTOR_MIN_ACROSS,
+                                          VECTOR_SPACING_KM)
 
 log = logging.getLogger(__name__)
 _coastline_warning_shown = False
@@ -88,6 +91,8 @@ def _norm_and_cmap(variable: VariableDefinition, data: np.ndarray):
 Layers = list[tuple[np.ndarray | None, GridDefinition]]
 #: A second field drawn over the first (e.g. precipitation over OLR).
 Overlay = tuple[VariableDefinition, Layers]
+#: Wind vectors, coarsest grid first: (eastward, northward) in m s-1, north-up.
+VectorLayers = list[tuple[np.ndarray, np.ndarray, GridDefinition]]
 
 
 @dataclass(frozen=True)
@@ -153,45 +158,50 @@ def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
     title: str, subtitle: str = "", dpi: int = 110,
     overlay: tuple[VariableDefinition, FieldResult | None] | None = None,
+    vectors: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> Path:
     """Map of one field over its grid's whole area. ``overlay`` is another
-    field on the same grid drawn on top (None field = nothing to overlay)."""
+    field on the same grid drawn on top (None field = nothing to overlay);
+    ``vectors`` = (eastward, northward) wind on the grid, drawn as arrows."""
     over = None
     if overlay is not None and overlay[1] is not None:
         over = (overlay[0], [(overlay[1].data, grid)])
     # In a lon/lat box the grid's edge is inside the map: outline it.
     return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
-                     outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi, overlay=over)
+                     outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi, overlay=over,
+                     vectors=None if vectors is None else [(*vectors, grid)])
 
 
 def plot_composite(
     path: Path, base: tuple[np.ndarray, GridDefinition],
     nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
     title: str, subtitle: str = "", area: SubArea | None = None, domain_edge: bool = False,
-    dpi: int = 110, overlay: Overlay | None = None,
+    dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
 ) -> Path:
     """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
     grids drawn on top (finest last) and their boundaries outlined in black. A
     nest with ``data=None`` is drawn as an outline only. ``domain_edge`` also
     outlines the base grid itself: dashed, or solid like the nests when the
     base grid is drawn in a lon/lat box (``uses_lonlat_view``). ``overlay`` is
-    a second field (base grid first, then the nests) drawn on top."""
+    a second field (base grid first, then the nests) drawn on top, and
+    ``vectors`` wind arrows (each from the finest grid at its position)."""
     base_grid = base[1]
     view = full_view(base_grid) if area is None else subarea_view(area)
     solid_edge = base_grid.uses_lonlat_view
     return _draw_map(path, view, [base, *nests], variable, title, subtitle,
                      outlines=[g for _, g in nests] + ([base_grid] if solid_edge else []),
                      dashed_outlines=[base_grid] if domain_edge and not solid_edge else [],
-                     dpi=dpi, overlay=overlay)
+                     dpi=dpi, overlay=overlay, vectors=vectors)
 
 
 def _draw_map(
     path: Path, view: MapView, layers: Layers,
     variable: VariableDefinition, title: str, subtitle: str = "",
     outlines: list[GridDefinition] = (), dashed_outlines: list[GridDefinition] = (),
-    dpi: int = 110, overlay: Overlay | None = None,
+    dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
 ) -> Path:
-    """Draw ``layers`` (coarsest first) in ``view``, and ``overlay`` on top."""
+    """Draw ``layers`` (coarsest first) in ``view``, ``overlay`` and wind
+    ``vectors`` on top."""
     proj = view.projection
     x0, x1, y0, y1 = view.extent
     aspect = (x1 - x0) / (y1 - y0)
@@ -212,6 +222,8 @@ def _draw_map(
             bx, by = _outline_in_view(view, grid)
             ax.plot(bx, by, color="black", linewidth=1.2, linestyle=style, transform=proj,
                     zorder=3)
+    if vectors:
+        _draw_vectors(fig, ax, view, vectors)
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
         gl.top_labels = False
@@ -274,6 +286,95 @@ def _draw_layers(ax, view: MapView, layers: Layers, variable: VariableDefinition
     if img is None:  # nothing in view; keep the colour bar
         img = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     return img
+
+
+def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers) -> None:
+    """Wind arrows on a square lattice spaced VECTOR_SPACING_KM apart on the
+    ground, or closer if that gives fewer than VECTOR_MIN_ACROSS arrows across
+    the map (then exactly that many across, and as many rows as fit). Each is
+    taken from the finest grid covering it (nearest cell). Arrows are
+    VECTOR_KM_PER_KNOT long on the ground per knot (scaled down in proportion
+    when the spacing is closer than VECTOR_SPACING_KM, so arrows keep their
+    size relative to the spacing), up to VECTOR_MAX_KNOTS, and point along the
+    wind as it looks in the map's projection."""
+    x0, x1, y0, y1 = view.extent
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    _, north_c = _ground_axes(view, np.array([cx]), np.array([cy]))
+    per_m = float(np.hypot(*north_c[:, 0]))  # view units per metre at the centre
+    full_step = VECTOR_SPACING_KM * 1e3 * per_m
+    step = min(full_step, (x1 - x0) / VECTOR_MIN_ACROSS)
+    m_per_knot = VECTOR_KM_PER_KNOT * 1e3 * step / full_step  # ground metres per knot
+    gx, gy = np.meshgrid(np.arange(x0 + step / 2, x1, step), np.arange(y0 + step / 2, y1, step))
+    gx, gy = gx.ravel(), gy.ravel()
+    lon, lat = _view_to_lonlat(view, gx, gy)
+    u = np.full(gx.shape, np.nan)
+    v = np.full(gx.shape, np.nan)
+    for ue, ve, grid in reversed(vectors):  # finest first
+        todo = np.isnan(u) & np.isfinite(lon)
+        if not todo.any():
+            break
+        x, y = Transformer.from_crs(grid.crs.geodetic_crs, grid.crs, always_xy=True).transform(
+            lon[todo], lat[todo])
+        t = grid.transform
+        col = np.floor((np.asarray(x) - t.c) / t.a)
+        row = np.floor((np.asarray(y) - t.f) / t.e)
+        ok = np.isfinite(col) & np.isfinite(row) & (col >= 0) & (col < grid.width) \
+            & (row >= 0) & (row < grid.height)
+        idx = np.flatnonzero(todo)[ok]
+        r, c = row[ok].astype(int), col[ok].astype(int)
+        u[idx], v[idx] = np.asarray(ue)[r, c], np.asarray(ve)[r, c]
+    speed = np.hypot(u, v)
+    keep = np.isfinite(speed) & (speed > 0)
+    if not keep.any():
+        return
+    gx, gy, u, v, speed = gx[keep], gy[keep], u[keep], v[keep], speed[keep]
+    east, north = _ground_axes(view, gx, gy)
+    length_m = np.minimum(speed * KNOTS_PER_M_S, VECTOR_MAX_KNOTS) * m_per_knot
+    du = length_m * (u / speed * east[0] + v / speed * north[0])
+    dv = length_m * (u / speed * east[1] + v / speed * north[1])
+    q = ax.quiver(gx, gy, du, dv, angles="xy", scale_units="xy", scale=1, pivot="middle",
+                  transform=view.projection, color="black", width=0.0016, headwidth=4,
+                  headlength=4.5, headaxislength=4, zorder=2.5)
+    # Key: the largest round speed whose arrow fits beside the colour bar.
+    ax.apply_aspect()  # equal-aspect maps can be narrower than their axes box
+    map_width_frac = ax.get_position().width  # as a fraction of the figure
+    def key_frac(kt):
+        return kt * m_per_knot * per_m / (x1 - x0) * map_width_frac
+    key_kt = next((kt for kt in (50, 20, 10, 5) if key_frac(kt) <= 0.08), 2)
+    ax.quiverkey(q, 0.905, 0.095, key_kt * m_per_knot * per_m,
+                 f"{key_kt} kt\n(max {VECTOR_MAX_KNOTS:g})", coordinates="figure",
+                 labelpos="S", fontproperties={"size": 8})
+
+
+def _view_to_lonlat(view: MapView, x: np.ndarray, y: np.ndarray
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    if view.crs is None:
+        return x + view.center_lon, y
+    lon, lat = Transformer.from_crs(view.crs, view.crs.geodetic_crs, always_xy=True).transform(x, y)
+    return np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64)
+
+
+def _lonlat_to_view(view: MapView, lon: np.ndarray, lat: np.ndarray
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    if view.crs is None:
+        return (lon - view.center_lon + 180.0) % 360.0 - 180.0, lat
+    x, y = Transformer.from_crs(view.crs.geodetic_crs, view.crs, always_xy=True).transform(lon, lat)
+    return np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+
+
+def _ground_axes(view: MapView, x: np.ndarray, y: np.ndarray
+                 ) -> tuple[np.ndarray, np.ndarray]:
+    """View-coordinate displacement per metre due east and due north on the
+    ground at view points (x, y); each is shape (2, n)."""
+    r_earth = 6371e3
+    d = 0.01  # degrees
+    lon, lat = _view_to_lonlat(view, x, y)
+    xe, ye = _lonlat_to_view(view, lon + d, lat)
+    xn, yn = _lonlat_to_view(view, lon, lat + d)
+    east_m = np.radians(d) * r_earth * np.cos(np.radians(lat))
+    north_m = np.radians(d) * r_earth
+    return (np.array([(xe - x) / east_m, (ye - y) / east_m]),
+            np.array([(xn - x) / north_m, (yn - y) / north_m]))
 
 
 def _colorbar(fig, rect: list[float], mappable, variable: VariableDefinition) -> None:

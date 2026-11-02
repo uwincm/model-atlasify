@@ -27,13 +27,16 @@ def test_catalog_structure(atlas, wrf_run):
     assert col.extra_fields["wrf:map_proj"] == 1
     assert len(col.extent.spatial.bboxes) == 1
     assert col.extent.temporal.intervals[0][0].isoformat().startswith("2026-10-06T00:00")
-    assert set(col.item_assets) >= {"surface_wind_speed", "precipitation", "precipitation_interval"}
+    assert set(col.item_assets) >= {"surface_wind_speed", "u10", "v10", "precipitation",
+                                    "precipitation_interval"}
+    assert "u10_map" not in col.item_assets  # GeoTIFF only
 
     items = sorted(col.get_items(), key=lambda i: i.datetime)
     assert [i.id for i in items] == [f"d01-20261006T0{h}0000Z" for h in range(4)]
     first, last = items[0], items[-1]
     assert "precipitation_interval" not in first.assets  # undefined at the first time
-    assert set(last.assets) == {"surface_wind_speed", "precipitation", "precipitation_interval"}
+    assert set(last.assets) == {"surface_wind_speed", "u10", "v10", "precipitation",
+                                "precipitation_interval"}
     assert last.properties["forecast:horizon"] == "PT3H"
     assert last.properties["forecast:reference_datetime"] == "2026-10-06T00:00:00Z"
     assert last.properties["proj:shape"] == [30, 40]

@@ -37,6 +37,8 @@ class VariableDefinition:
     draws: str | None = None
     # False = GeoTIFF only, no maps of its own (e.g. OLR, mapped as olr_precipitation).
     maps: bool = True
+    # (eastward, northward) wind variables drawn as vectors on this variable's maps.
+    vectors: tuple[str, str] | None = None
     # A spatially constant field (e.g. wind identically 0) almost always means
     # zero-filled/corrupt input. False for fields that are legitimately
     # constant sometimes (precipitation is all 0 at initialization).

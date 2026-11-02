@@ -248,9 +248,13 @@ def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
     (the fields that passed their checks at this time)."""
     style = get_variable(var.draws) if var.draws else var
     over = computed.get(var.overlay) if var.overlay else None
+    vectors = None  # wind arrows
+    if var.vectors and all(c in computed for c in var.vectors):
+        vectors = tuple(computed[c].data for c in var.vectors)
     title, subtitle = _titles(ds, fld, style.long_name, style.units, over)
     _worker["plot_field"](png, fld, ds.grid_at(ti), style, title, subtitle,
-                          overlay=(get_variable(var.overlay), over) if var.overlay else None)
+                          overlay=(get_variable(var.overlay), over) if var.overlay else None,
+                          vectors=vectors)
 
 
 # ------------------------------------------------------ composite maps
@@ -278,6 +282,10 @@ class _CompositeTask:
     # (GeoTIFF, metadata) or None, and one GeoTIFF or None per entry of nests.
     overlay_base: tuple[Path, FieldResult] | None = None
     overlay_nests: list[Path | None] = field(default_factory=list)
+    # Wind vectors (VariableDefinition.vectors), if any: the base's (u, v)
+    # GeoTIFFs or None, and (u, v) or None per entry of nests.
+    vector_base: tuple[Path, Path] | None = None
+    vector_nests: list[tuple[Path, Path] | None] = field(default_factory=list)
 
 
 def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
@@ -317,7 +325,13 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
                 meta = dataclasses.replace(meta, variable=vname)
             over_name = var.overlay
             over_base = products.get((base.dataset_id, valid, over_name)) if over_name else None
-            layers, over_layers = [], []
+
+            def uv(dataset_id: str) -> tuple[Path, Path] | None:
+                tifs = [products.get((dataset_id, valid, c)) for c in var.vectors or ()]
+                return tuple(t[0] for t in tifs) if tifs and all(tifs) else None
+
+            vec_base = uv(base.dataset_id)
+            layers, over_layers, vec_layers = [], [], []
             for nest in nests:
                 ni = nest_times[nest.dataset_id].get(valid)
                 if ni is None and nest.moving:
@@ -327,10 +341,12 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
                 if over_base is not None:
                     over_layers.append(same_period(
                         products.get((nest.dataset_id, valid, over_name)), over_base[1]))
+                if vec_base is not None:
+                    vec_layers.append(uv(nest.dataset_id))
             tasks.append(_CompositeTask(
                 base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
                 area, edge, (base.dataset_id, bi, tif, meta), layers,
-                over_base, over_layers))
+                over_base, over_layers, vec_base, vec_layers))
     return tasks
 
 
@@ -368,6 +384,11 @@ def _plot_composite(task: _CompositeTask) -> Path:
             (None if t is None else _read_tif(t), grid)
             for t, (_, grid) in zip(task.overlay_nests, nests)]
         overlay = (get_variable(var.overlay), over_layers)
+    vectors = None
+    if task.vector_base is not None:
+        vectors = [(*map(_read_tif, task.vector_base), base_ds.grid_at(bi))] + [
+            (*map(_read_tif, uv), grid)
+            for uv, (_, grid) in zip(task.vector_nests, nests) if uv is not None]
     title, subtitle = _titles(base_ds, meta, style.long_name, style.units,
                               None if task.overlay_base is None else over_meta)
     overlaid = [(nid, grid) for (nid, _, tif), (_, grid) in zip(task.nests, nests)
@@ -382,7 +403,7 @@ def _plot_composite(task: _CompositeTask) -> Path:
         subtitle += f"  |  area '{task.area.name}'"
     return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid_at(bi)),
                                      nests, style, title, subtitle, area=task.area,
-                                     domain_edge=task.edge, overlay=overlay)
+                                     domain_edge=task.edge, overlay=overlay, vectors=vectors)
 
 
 def _log_levels() -> dict[str, int]:
@@ -542,12 +563,13 @@ def _variables_for(requested: list[str] | None, adapters: list[ModelAdapter]) ->
 
 def _with_dependencies(variables: list[str], report: Callable[[str], None]) -> list[str]:
     """``variables`` plus the variables their maps need (olr_precipitation
-    draws olr and overlays precipitation_interval), each placed just before
+    draws olr and overlays precipitation_interval; surface_wind_speed draws
+    u10/v10 vectors), each placed just before
     the first variable that uses it so it is computed first at every time."""
     out: list[str] = []
     for v in variables:
         var = get_variable(v)
-        for dep in (var.draws, var.overlay):
+        for dep in (var.draws, var.overlay, *(var.vectors or ())):
             if dep and dep not in out:
                 if dep not in variables:
                     report(f"Also making {dep}: the {v} maps use it.")

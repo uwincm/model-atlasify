@@ -83,7 +83,7 @@ def test_cli_writes_everything_to_s3(s3, tmp_path, monkeypatch, capsys):
             "atlas/run01/model-images/full/surface_wind_speed.html"} <= keys
     assert any(k.startswith("atlas/run01/command-used.") for k in keys)
     tifs = sorted(k for k in keys if k.endswith(".tif"))
-    assert len(tifs) == 3 + 3 + 2  # wind, precipitation, interval precipitation
+    assert len(tifs) == 3 * 3 + 3 + 2  # wind speed + u10 + v10, precipitation, interval
     assert any(k.startswith("atlas/run01/model-images/full/precipitation/") and k.endswith(".png")
                for k in keys)
     assert not any(".modelatlasify-write-check" in k for k in keys)  # probe cleaned up

@@ -25,7 +25,7 @@ from modelatlasify.core.model import FieldResult, GridDefinition, ModelAdapter, 
 from modelatlasify.core.namelist import read_namelist
 from modelatlasify.models.wrf.projection import MAP_PROJ_NAMES, wrf_grid
 from modelatlasify.variables.precipitation import NEGATIVE_TOLERANCE_MM, interval_precipitation
-from modelatlasify.variables.wind import destagger, wind_speed
+from modelatlasify.variables.wind import destagger, earth_relative, wind_speed
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +141,8 @@ class _WRFState:
     spray_off_reason: str | None = None
     # Why OLR cannot be made (None = the output has it).
     olr_missing_reason: str | None = None
+    # Why u10/v10 cannot be made (None = the output has U10 and V10).
+    uv10_missing_reason: str | None = None
 
 
 class WRFAdapter(ModelAdapter):
@@ -150,6 +152,7 @@ class WRFAdapter(ModelAdapter):
         self._handles: dict[Path, netCDF4.Dataset] = {}
         self._accum_cache: dict[tuple[str, str, int], tuple[np.ndarray, dict]] = {}
         self._accum_check: dict[tuple[str, str, int], str | None] = {}  # None = passed
+        self._uv_cache: dict = {}  # last earth-relative u10/v10 (computed together)
         self.skipped_files: list[tuple[Path, str]] = []
 
     # ------------------------------------------------------------------ I/O
@@ -407,13 +410,18 @@ class WRFAdapter(ModelAdapter):
                                     accumulation_start=accumulation_start,
                                     output_interval=output_interval,
                                     spray_off_reason=spray_off_reason(directory),
-                                    olr_missing_reason=self._olr_missing_reason(entries[0][1].path)),
+                                    olr_missing_reason=self._missing_reason(
+                                        entries[0][1].path, ("OLR",)),
+                                    uv10_missing_reason=self._missing_reason(
+                                        entries[0][1].path, ("U10", "V10"))),
         )
 
     @staticmethod
-    def _olr_missing_reason(path: Path) -> str | None:
+    def _missing_reason(path: Path, names: tuple[str, ...]) -> str | None:
+        """Why a product needing ``names`` cannot be made from ``path``, or None."""
         with netCDF4.Dataset(path, "r") as nc:
-            return None if "OLR" in nc.variables else f"no OLR in {path.name}"
+            missing = [n for n in names if n not in nc.variables]
+        return f"no {'/'.join(missing)} in {path.name}" if missing else None
 
     @staticmethod
     def _accumulation_start(domain: int, sim_start: datetime | None, entries) -> datetime | None:
@@ -439,7 +447,7 @@ class WRFAdapter(ModelAdapter):
     # ---------------------------------------------------------- variables
     def supported_variables(self) -> list[str]:
         return ["surface_wind_speed", "precipitation", "precipitation_interval",
-                "olr", "olr_precipitation", *SPRAY_FIELDS]
+                "olr", "olr_precipitation", "u10", "v10", *SPRAY_FIELDS]
 
     def unavailable_variables(self, dataset: ModelDataset) -> dict[str, str]:
         out = {}
@@ -448,6 +456,8 @@ class WRFAdapter(ModelAdapter):
             out.update({v: f"sea spray was not on: {reason}" for v in SPRAY_FIELDS})
         if dataset.adapter_state.olr_missing_reason is not None:
             out["olr"] = out["olr_precipitation"] = dataset.adapter_state.olr_missing_reason
+        if dataset.adapter_state.uv10_missing_reason is not None:
+            out["u10"] = out["v10"] = dataset.adapter_state.uv10_missing_reason
         return out
 
     def compute(self, dataset: ModelDataset, variable: str, time_index: int) -> FieldResult | None:
@@ -464,6 +474,9 @@ class WRFAdapter(ModelAdapter):
             )
         if variable == "precipitation_interval":
             return self._interval_precip(dataset, time_index)
+        if variable in ("u10", "v10"):
+            data, prov = self._earth_relative_wind10(dataset, time_index)
+            return FieldResult(variable, data[variable], valid, provenance=prov)
         if variable == "olr":
             data, prov = self._olr(dataset, time_index)
             return FieldResult(variable, data[::-1].copy(), valid, provenance=prov)
@@ -528,6 +541,35 @@ class WRFAdapter(ModelAdapter):
             "method": f"{native} as written by WRF; sea spray on per {UWIN_NAMELIST} "
                       f"({SPRAY_SWITCH} = .T.)",
         }
+
+    def _earth_relative_wind10(self, dataset, t):
+        """Eastward/northward 10 m wind (north-up), from WRF's grid-relative
+        U10/V10 rotated with the grid's own map projection."""
+        key = (dataset.run_id, dataset.dataset_id, t)
+        if self._uv_cache.get("key") == key:
+            return self._uv_cache["value"]
+        missing = [n for n in ("U10", "V10") if not self._has(dataset, t, n)]
+        if missing:
+            raise VariableUnavailableError(
+                f"Cannot compute u10/v10 for {dataset.dataset_id}: {'/'.join(missing)} missing "
+                f"in {dataset.adapter_state.slots[t].path.name}.")
+        for name in ("U10", "V10"):
+            units = self._units(dataset, t, name)
+            if units.replace(" ", "") not in ("ms-1", "ms{-1}", "m/s"):
+                raise VariableUnavailableError(
+                    f"{name} has units '{units}', expected 'm s-1'; refusing to guess a "
+                    "conversion.")
+        u = self._read_2d(dataset, t, "U10")[::-1]
+        v = self._read_2d(dataset, t, "V10")[::-1]
+        ue, ve = earth_relative(u, v, dataset.grid_at(t))
+        value = ({"u10": ue, "v10": ve}, {
+            "source_variables": ["U10", "V10"],
+            "method": "U10/V10 (grid-relative, 10 m) rotated to east/north using the "
+                      "local orientation of the grid's map projection",
+            "height_m": 10,
+        })
+        self._uv_cache = {"key": key, "value": value}
+        return value
 
     def _olr(self, dataset, t):
         if not self._has(dataset, t, "OLR"):

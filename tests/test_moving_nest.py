@@ -83,7 +83,9 @@ def test_products_follow_the_nest(moving_run, tmp_path):
     assert np.isnan(amount[:, -MOVE[0]:]).all()  # and east by two columns
 
     images = list((run_dir / "model-images" / "full").rglob("*.png"))
-    assert len(images) == len(list(run_dir.glob("items/d01-*/*.tif")))
+    # One composite per mapped d01 GeoTIFF (u10/v10 have no maps of their own).
+    assert len(images) == len([p for p in run_dir.glob("items/d01-*/*.tif")
+                               if p.stem not in ("u10", "v10")])
 
 
 def test_composite_task_uses_the_nest_position_at_each_time(moving_run):

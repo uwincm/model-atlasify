@@ -23,14 +23,14 @@ def test_cli_end_to_end(wrf_run, tmp_path, capsys):
     assert re.search(r"georeference fit error [\d.]+ m\.\n", captured.err)
     assert "[run01 d01" not in captured.err  # no per-time lines; a progress bar instead
     assert (run_out(out, wrf_run) / "collection.json").is_file()
-    assert len(list(run_out(out, wrf_run).glob("items/*/*.tif"))) == 4 + 4 + 3
+    assert len(list(run_out(out, wrf_run).glob("items/*/*.tif"))) == 3 * 4 + 4 + 3  # wind + u10 + v10
 
 
 def test_cli_variable_selection(wrf_run, tmp_path):
     out = tmp_path / "atlas"
     assert main([str(wrf_run), "-o", str(out), "--variables", "wind", "--no-plots",
                  "--no-validate"]) == 0
-    assert {p.name for p in run_out(out, wrf_run).glob("items/*/*.tif")} == {"surface_wind_speed.tif"}
+    assert {p.name for p in run_out(out, wrf_run).glob("items/*/*.tif")} == {"surface_wind_speed.tif", "u10.tif", "v10.tif"}
 
 
 def test_cli_unknown_variable(wrf_run, tmp_path, capsys):
@@ -261,7 +261,7 @@ def test_cli_spray_run_makes_spray_products(tmp_path, capsys):
     assert main([str(run), "-o", str(out), "--variables", "wind,spray", "--no-validate"]) == 0
     assert "WARNING" not in capsys.readouterr().err
     tifs = {p.name for p in run_out(out, run).glob("items/*/*.tif")}
-    assert tifs == {"surface_wind_speed.tif"} | SPRAY_TIFS
+    assert tifs == {"surface_wind_speed.tif", "u10.tif", "v10.tif"} | SPRAY_TIFS
     for var in ("spray_mass_flux", "spray_latent_heat_flux", "spray_sensible_heat_flux"):
         assert list((run_out(out, run) / "model-images" / "full" / var).glob("*.png"))
 
@@ -276,7 +276,7 @@ def test_cli_spray_requested_for_run_without_spray_warns_and_skips(tmp_path, cap
     assert rc == 0
     assert ("WARNING: run '" in err and "skipping spray_mass_flux, spray_latent_heat_flux, "
             "spray_sensible_heat_flux (sea spray was not on" in err)
-    assert {p.name for p in run_out(out, run).glob("items/*/*.tif")} == {"surface_wind_speed.tif"}
+    assert {p.name for p in run_out(out, run).glob("items/*/*.tif")} == {"surface_wind_speed.tif", "u10.tif", "v10.tif"}
     collection = json.loads((run_out(out, run) / "collection.json").read_text())
     assert not any(k.startswith("spray") for k in collection.get("item_assets", {}))
 
