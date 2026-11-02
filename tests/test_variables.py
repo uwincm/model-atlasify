@@ -209,7 +209,7 @@ def test_interval_helper_clips_roundoff_and_masks_real_decreases():
 
 
 def test_variable_aliases():
-    assert resolve_names(["wind"]) == ["surface_wind_speed"]
+    assert resolve_names(["wind"]) == ["surface_wind_speed", "u10", "v10"]
     assert resolve_names(["precipitation"]) == ["precipitation", "precipitation_interval"]
     assert resolve_names(["spray"]) == ["spray_mass_flux", "spray_latent_heat_flux",
                                         "spray_sensible_heat_flux"]
@@ -332,3 +332,49 @@ def test_olr_zeros_are_missing_and_mostly_zero_is_rejected(tmp_path):
     f = adapter.compute(ds, "olr", 1)
     assert np.isnan(f.data[:, -1]).all() and np.isfinite(f.data[:, :-1]).all()
     assert f.provenance["n_zero_set_missing"] == ds.grid.height
+
+
+# ------------------------------------------------------- u10 / v10 vectors
+@pytest.mark.parametrize("map_proj", [1, 2, 3])  # Lambert, polar stereographic, Mercator
+def test_grid_rotation_matches_meridian_convergence(tmp_path, map_proj):
+    from pyproj import Proj
+
+    from modelatlasify.variables.wind import grid_rotation
+
+    write_wrfout(tmp_path / "r", hourly(T0, 1), map_proj=map_proj)
+    (ds,) = WRFAdapter().discover(tmp_path / "r")
+    g = ds.grid
+    convergence = np.radians(Proj(g.crs).get_factors(g.lon, g.lat).meridian_convergence)
+    np.testing.assert_allclose(grid_rotation(g), -convergence, atol=1e-4)
+
+
+@pytest.mark.parametrize("map_proj", [1, 3])
+def test_u10_v10_are_earth_relative(tmp_path, map_proj):
+    from modelatlasify.variables.wind import grid_rotation
+
+    write_wrfout(tmp_path / "r", hourly(T0, 2), map_proj=map_proj)
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    assert {"u10", "v10"} <= set(adapter.dataset_variables(ds))
+    u = adapter.compute(ds, "u10", 1).data
+    v = adapter.compute(ds, "v10", 1).data
+    nx = ds.grid.width
+    ug = np.broadcast_to(3.0 * (1 + np.arange(nx) / nx), u.shape)  # fixture U10, V10
+    vg = np.broadcast_to(4.0 * (1 + np.arange(nx) / nx), u.shape)
+    np.testing.assert_allclose(np.hypot(u, v), np.hypot(ug, vg), rtol=1e-6)  # speed kept
+    theta = grid_rotation(ds.grid)
+    np.testing.assert_allclose(u, ug * np.cos(theta) - vg * np.sin(theta), rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(v, ug * np.sin(theta) + vg * np.cos(theta), rtol=1e-6, atol=1e-9)
+    if map_proj == 3:  # Mercator: grid-relative is already earth-relative
+        np.testing.assert_allclose(u, ug, rtol=1e-6)
+    else:
+        assert np.abs(theta).max() > 0.01  # the Lambert test actually rotates
+
+
+def test_u10_v10_unavailable_without_u10(tmp_path):
+    write_wrfout(tmp_path / "r", hourly(T0, 1), include=("U", "V", "RAINC", "RAINNC"))
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    unavailable = adapter.unavailable_variables(ds)
+    assert "no U10/V10" in unavailable["u10"] and "no U10/V10" in unavailable["v10"]
+    assert "surface_wind_speed" in adapter.dataset_variables(ds)  # falls back to U/V

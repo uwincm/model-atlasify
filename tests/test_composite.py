@@ -16,7 +16,8 @@ def test_composite_maps_with_nest(tmp_path):
     images = run_out(out, run) / "model-images" / "full"
     pngs = {p.relative_to(images).as_posix() for p in images.rglob("*.png")}
     assert "precipitation/uwincm.full.precipitation.20261006T010000Z.png" in pngs
-    d01_tifs = list(run_out(out, run).glob("items/d01-*/*.tif"))
+    d01_tifs = [p for p in run_out(out, run).glob("items/d01-*/*.tif")
+                if p.stem not in ("u10", "v10")]  # GeoTIFF only, no maps
     assert len(pngs) == len(d01_tifs) == 3 + 3 + 2
     for p in pngs:
         var, name = p.split("/")
@@ -197,3 +198,90 @@ def test_olr_precipitation_maps(tmp_path, capsys):
     summary = (run_out(out, run) / "model-images.html").read_text(encoding="utf-8")
     assert "OLR with interval precipitation" in summary
     assert validate_catalog(out / "catalog.json", schemas=False).ok
+
+
+def test_wind_vectors_on_every_domain_and_composites(tmp_path, monkeypatch):
+    from modelatlasify.plotting import maps
+
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 2))
+    write_wrfout(run, hourly(T0, 2), domain=2, nx=20, ny=16, dx=4000.0)
+    calls = []
+    real = maps._draw_vectors
+    monkeypatch.setattr(maps, "_draw_vectors", lambda fig, ax, view, vectors: (
+        calls.append((ax.figure, [g.width for _, _, g in vectors])), real(fig, ax, view, vectors)))
+    saved = []
+    real_draw = maps._draw_map
+    monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (
+        saved.append((str(path), bool(k.get("vectors")))), real_draw(path, *a, **k))[1])
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--variables", "wind", "--no-validate"]) == 0
+    items = [(p, v) for p, v in saved if "/items/" in p]
+    assert {p.split("/items/")[1][:3] for p, _ in items} == {"d01", "d02"}
+    assert all(v for _, v in items)  # every domain's per-item maps have vectors
+    composites = [p for p, v in saved if "/model-images/" in p]
+    assert composites and all(v for p, v in saved if "/model-images/" in p)
+    assert any(widths == [40, 20] for _, widths in calls)  # composites use the nest's winds
+
+
+def test_vector_lengths_spacing_and_cap():
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from pyproj import CRS
+    from rasterio.transform import from_origin
+
+    from modelatlasify.core.model import GridDefinition
+    from modelatlasify.plotting.maps import _draw_vectors, full_view
+
+    crs = CRS.from_proj4("+proj=merc +lat_ts=0 +lon_0=0 +R=6370000 +units=m")
+    dx = 25e3
+    # 6000 km wide: 24 arrows across at 250 km, so the 20-across rule does not apply.
+    grid = GridDefinition(crs=crs, transform=from_origin(0.0, 2e6, dx, dx), width=240, height=80)
+    view = full_view(grid)
+    u = np.zeros((80, 240))
+    u[:, :120] = 10.0 / (3600 / 1852)  # 10 kt westerly in the west half
+    u[:, 120:] = 100.0 / (3600 / 1852)  # 100 kt (capped at 70) in the east half
+    fig = plt.figure()
+    ax = fig.add_axes([0, 0, 1, 1], projection=view.projection)
+    ax.set_extent(view.extent, crs=view.projection)
+    _draw_vectors(fig, ax, view, [(u, np.zeros_like(u), grid)])
+    (q,) = [c for c in ax.collections if hasattr(c, "U")]
+    x, y = q.X, q.Y
+    lat = np.degrees(2 * np.arctan(np.exp(y / 6370e3)) - np.pi / 2)
+    k = 1 / np.cos(np.radians(lat))  # Mercator scale factor: map metres per ground metre
+    length_km = np.asarray(q.U) / k / 1e3
+    assert np.allclose(np.asarray(q.V), 0, atol=1e-6)  # due east
+    np.testing.assert_allclose(length_km[x < 3e6], 100.0, rtol=0.01)  # 100 km per 10 kt
+    np.testing.assert_allclose(length_km[x > 3e6], 700.0, rtol=0.01)  # capped at 70 kt
+    spacing_km = np.diff(np.unique(np.round(x)))[0] / 1e3 / k[0]
+    assert 240 < spacing_km < 260  # every ~250 km on the ground (centre of the map)
+    assert len(np.unique(np.round(x))) == 24  # 6000 km / 250 km
+    plt.close(fig)
+
+
+def test_small_maps_get_twenty_vectors_across():
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from pyproj import CRS
+    from rasterio.transform import from_origin
+
+    from modelatlasify.core.model import GridDefinition
+    from modelatlasify.plotting.maps import _draw_vectors, full_view
+
+    crs = CRS.from_proj4("+proj=merc +lat_ts=0 +lon_0=0 +R=6370000 +units=m")
+    # 1000 km wide, 600 km tall: 250 km spacing would give only 4 across.
+    grid = GridDefinition(crs=crs, transform=from_origin(0.0, 6e5, 5e3, 5e3), width=200,
+                          height=120)
+    view = full_view(grid)
+    u = np.full((120, 200), 5.0)
+    fig = plt.figure()
+    ax = fig.add_axes([0, 0, 1, 1], projection=view.projection)
+    ax.set_extent(view.extent, crs=view.projection)
+    _draw_vectors(fig, ax, view, [(u, np.zeros_like(u), grid)])
+    (q,) = [c for c in ax.collections if hasattr(c, "U")]
+    assert len(np.unique(np.round(q.X))) == 20  # 50 km apart
+    assert len(np.unique(np.round(q.Y))) == 12  # the same spacing vertically
+    length = np.asarray(q.U) / (1 / np.cos(np.radians(2.7)))  # ~ground metres near 2.7 N
+    # 50 km spacing instead of 250 km: arrows are 1/5 as long per knot (2 km per knot).
+    np.testing.assert_allclose(length, 5.0 * 3600 / 1852 * 10e3 / 5, rtol=0.01)
+    plt.close(fig)

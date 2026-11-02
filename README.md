@@ -37,7 +37,9 @@ line.
   it is resampled onto a regular lon/lat grid, with a warning (see
   [DWM grids](#dwm-grids)). The start time comes from `namelists/main.nml`
   when present.
-- **Surface wind speed** (10 m), in m s-1
+- **Surface wind** (10 m), in m s-1: speed, plus earth-relative eastward and
+  northward components (`u10`, `v10`, GeoTIFFs only). Speed maps show wind
+  vectors on the composites and the per-item maps
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration
   - accumulated over each output interval
@@ -121,7 +123,8 @@ atlas/
         ├── d01-20261006T000000Z/
         │   ├── d01-20261006T000000Z.json     # STAC Item: domain d01 @ valid time
         │   ├── surface_wind_speed.tif
-        │   ├── surface_wind_speed.png
+        │   ├── surface_wind_speed.png        # with wind vectors
+        │   ├── u10.tif, v10.tif              # earth-relative 10 m wind components
         │   ├── precipitation.tif
         │   └── precipitation.png
         └── d01-20261006T010000Z/
@@ -220,7 +223,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`), or `s3://bucket/prefix` to write to S3 (see [Output to S3](#output-to-s3)). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf` or `dwm` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
-| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
 | `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
@@ -344,6 +347,32 @@ in a box around the domain's outer edge plus 1° on every side.
 - If U10/V10 are absent, the tool falls back to the lowest model level `U`/`V`,
   destaggered to mass points by averaging adjacent faces. That is **not** a 10 m
   wind; the asset's `modelatlasify:provenance` and a warning say so.
+
+### 10 m wind components and vectors
+
+- `u10`/`v10` are the eastward/northward (earth-relative) 10 m wind, in m s-1,
+  published as GeoTIFFs and STAC `data` assets, with no maps of their own.
+  WRF's `U10`/`V10` are grid-relative; they are rotated by the local angle
+  between the grid's x axis and east. That angle is computed from the grid's
+  own map projection (so it holds for every position of a moving nest), and
+  agrees with WRF's `COSALPHA`/`SINALPHA` to ~1e-5. They need `U10`/`V10`;
+  there is no lowest-model-level fallback as for the speed.
+- Surface wind speed maps draw wind vectors: the composites in
+  `model-images/` (whole domain and sub-areas) and every domain's per-item
+  maps.
+  - Arrows sit on a square lattice, one every 250 km on the ground. If that
+    gives fewer than 20 arrows across the map (small nests and sub-areas),
+    the spacing shrinks so there are exactly 20 across, with the same spacing
+    vertically. On composites each arrow is from the finest domain at that
+    point (nearest grid cell).
+  - Length on the ground: 100 km per 10 kt at the 250 km spacing, growing up
+    to 70 kt and no further. When the spacing is closer, the length per knot
+    shrinks in proportion (e.g. 50 km spacing: 20 km per 10 kt), so arrows
+    keep the same size relative to the spacing on every map. A key arrow
+    (50, 20, 10, 5 or 2 kt, the largest that fits) shows each map's scale,
+    bottom right.
+  - Requesting `surface_wind_speed` alone also makes `u10`/`v10`, which the
+    vectors are drawn from.
 
 ### Precipitation
 
