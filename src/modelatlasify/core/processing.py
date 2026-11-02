@@ -190,7 +190,7 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
     valid = ds.valid_times[ti]
     item_dir = _worker["builder"].item_dir(ds, valid)
     res = _TimeResult(run_id, dataset_id, ti)
-    supported = adapter.supported_variables()
+    supported = adapter.dataset_variables(ds)
     for vname in (v for v in _worker["variables"] if v in supported):
         var = get_variable(vname)
         try:
@@ -346,9 +346,12 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
         runs = discover(adapter_list, options.inputs, options.domains, report, options.cut_dirs)
         used = [adapters[m] for m in dict.fromkeys(d.model for ds in runs.values() for d in ds)]
         variables = _variables_for(options.variables, used)
+        if options.variables is not None:
+            for datasets in runs.values():
+                _warn_unavailable(datasets, variables, adapters, report)
         for run_id in list(runs):  # leave out models that make none of the variables
             keep = [d for d in runs[run_id]
-                    if set(variables) & set(adapters[d.model].supported_variables())]
+                    if set(variables) & set(adapters[d.model].dataset_variables(d))]
             for d in runs[run_id]:
                 if d not in keep:
                     report(f"  ({d.model} {d.dataset_id} of '{d.run_path}' skipped: it provides "
@@ -367,7 +370,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
         all_datasets = {(d.run_id, d.dataset_id): d for dss in runs.values() for d in dss}
         for ds in all_datasets.values():
             adapter = adapters[ds.model]
-            adapter.prepare(ds, [v for v in variables if v in adapter.supported_variables()])
+            adapter.prepare(ds, [v for v in variables if v in adapter.dataset_variables(ds)])
         if options.plots:
             from modelatlasify.plotting.maps import prefetch_geography
 
@@ -443,7 +446,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                 for images_dir in sorted({t.path.parents[2] for t in tasks}):
                     write_summary(images_dir)
             builder.add_run(run_id, datasets, items,
-                            [v for v in variables if any(v in adapters[d.model].supported_variables()
+                            [v for v in variables if any(v in adapters[d.model].dataset_variables(d)
                                                          for d in datasets)])
         catalog_path = builder.save()
     finally:
@@ -476,6 +479,22 @@ def _variables_for(requested: list[str] | None, adapters: list[ModelAdapter]) ->
         raise DiscoveryError(f"No model found in the input can produce: {', '.join(missing)}. "
                              f"Found: {found}")
     return list(requested)
+
+
+def _warn_unavailable(datasets: list[ModelDataset], variables: list[str],
+                      adapters: dict[str, ModelAdapter], report: Callable[[str], None]) -> None:
+    """Warn, once per run and reason, about requested variables that a model
+    can make in general but not for this run (e.g. sea spray products of a run
+    without spray). Those products are skipped for the run."""
+    by_reason: dict[str, dict[str, list[str]]] = {}  # reason -> variable -> dataset ids
+    for d in datasets:
+        for v, reason in adapters[d.model].unavailable_variables(d).items():
+            if v in variables:
+                by_reason.setdefault(reason, {}).setdefault(v, []).append(d.dataset_id)
+    for reason, per_var in by_reason.items():
+        ids = sorted({i for ids in per_var.values() for i in ids})
+        report(f"WARNING: run '{datasets[0].run_path or datasets[0].run_id}' "
+               f"({', '.join(ids)}): skipping {', '.join(per_var)} ({reason}).")
 
 
 def _model_groups(datasets: list[ModelDataset]) -> list[list[ModelDataset]]:

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from conftest import T0, run_out
-from wrf_fixture import hourly, write_wrfout
+from wrf_fixture import SPRAY_FIELDS, hourly, write_uwin_nml, write_wrfout
 from modelatlasify.cli import main
 
 
@@ -243,3 +243,58 @@ def test_run_location():
     assert run_location(Path("/data/wrf/run01"), 1)[:2] == (Path("wrf/run01"), "wrf--run01")
     assert run_location(Path("/data/wrf/run01"), 2)[2] is False
     assert run_location(Path("/data/wrf/run01"), 3) == (Path("run01"), "run01", True)
+
+
+SPRAY_TIFS = {"spray_mass_flux.tif", "spray_latent_heat_flux.tif", "spray_sensible_heat_flux.tif"}
+
+
+def _spray_run(path: Path, spray: bool | None) -> Path:
+    write_wrfout(path, hourly(T0, 3), include=("U10", "V10", "RAINC", "RAINNC", *SPRAY_FIELDS))
+    if spray is not None:
+        write_uwin_nml(path, spray=spray)
+    return path
+
+
+def test_cli_spray_run_makes_spray_products(tmp_path, capsys):
+    run = _spray_run(tmp_path / "spray_on", spray=True)
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--variables", "wind,spray", "--no-validate"]) == 0
+    assert "WARNING" not in capsys.readouterr().err
+    tifs = {p.name for p in run_out(out, run).glob("items/*/*.tif")}
+    assert tifs == {"surface_wind_speed.tif"} | SPRAY_TIFS
+    for var in ("spray_mass_flux", "spray_latent_heat_flux", "spray_sensible_heat_flux"):
+        assert list((run_out(out, run) / "model-images" / "full" / var).glob("*.png"))
+
+
+@pytest.mark.parametrize("spray", [False, None])
+def test_cli_spray_requested_for_run_without_spray_warns_and_skips(tmp_path, capsys, spray):
+    run = _spray_run(tmp_path / "spray_off", spray=spray)
+    out = tmp_path / "atlas"
+    rc = main([str(run), "-o", str(out), "--variables", "wind,spray", "--no-plots",
+               "--no-validate"])
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert ("WARNING: run '" in err and "skipping spray_mass_flux, spray_latent_heat_flux, "
+            "spray_sensible_heat_flux (sea spray was not on" in err)
+    assert {p.name for p in run_out(out, run).glob("items/*/*.tif")} == {"surface_wind_speed.tif"}
+    collection = json.loads((run_out(out, run) / "collection.json").read_text())
+    assert not any(k.startswith("spray") for k in collection.get("item_assets", {}))
+
+
+def test_cli_default_variables_skip_spray_quietly_when_off(tmp_path, capsys):
+    on = _spray_run(tmp_path / "on", spray=True)
+    off = _spray_run(tmp_path / "off", spray=False)
+    out = tmp_path / "atlas"
+    assert main([str(on), str(off), "-o", str(out), "--no-plots", "--no-validate"]) == 0
+    assert "skipping spray" not in capsys.readouterr().err
+    assert SPRAY_TIFS <= {p.name for p in run_out(out, on).glob("items/*/*.tif")}
+    assert not SPRAY_TIFS & {p.name for p in run_out(out, off).glob("items/*/*.tif")}
+
+
+def test_cli_only_spray_requested_and_no_run_has_spray(tmp_path, capsys):
+    run = _spray_run(tmp_path / "off", spray=False)
+    rc = main([str(run), "-o", str(tmp_path / "a"), "--variables", "spray", "--no-plots"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "skipping spray_mass_flux" in err
+    assert "None of the inputs provides the requested variables" in err

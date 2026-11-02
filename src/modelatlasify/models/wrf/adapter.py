@@ -22,6 +22,7 @@ import numpy as np
 from modelatlasify.core.errors import (DiscoveryError, FieldQualityError, GeoreferenceError,
                                        NoModelOutputError, VariableUnavailableError)
 from modelatlasify.core.model import FieldResult, GridDefinition, ModelAdapter, ModelDataset, shift_to_grid
+from modelatlasify.core.namelist import read_namelist
 from modelatlasify.models.wrf.projection import MAP_PROJ_NAMES, wrf_grid
 from modelatlasify.variables.precipitation import NEGATIVE_TOLERANCE_MM, interval_precipitation
 from modelatlasify.variables.wind import destagger, wind_speed
@@ -40,6 +41,41 @@ MAX_DECREASE_FRACTION_MOVING = 0.2
 
 WRFOUT_PATTERN = re.compile(r"^wrfout_d(?P<domain>\d{2})_(?P<time>\d{4}-\d{2}-\d{2}_\d{2}[:_]\d{2}[:_]\d{2})")
 WRF_TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
+
+#: Sea spray product -> WRF output variable and the units it must have. WRF
+#: writes these whether or not spray is on (zeros when off), so whether spray
+#: was on comes from the coupler's uwin.nml (see ``spray_off_reason``).
+SPRAY_FIELDS = {
+    "spray_mass_flux": ("MSPR", "kg m-2 s-1"),
+    "spray_latent_heat_flux": ("HLSPR", "W m-2"),
+    "spray_sensible_heat_flux": ("HSSPR", "W m-2"),
+}
+#: The UWIN-CM coupler namelist and its spray switch.
+UWIN_NAMELIST = "uwin.nml"
+SPRAY_SWITCH = "sprayMediatedHeatFluxes"
+
+
+def spray_off_reason(directory: Path) -> str | None:
+    """None if sea spray was on in the run in ``directory``, else why it is
+    considered off.
+
+    Spray is on only when ``uwin.nml`` sets ``sprayMediatedHeatFluxes = .T.``.
+    Spray needs the wave coupling, so stand-alone WRF (no uwin.nml) has none.
+    """
+    path = Path(directory) / UWIN_NAMELIST
+    if not path.is_file():
+        return f"no {UWIN_NAMELIST} in {directory}, so not a UWIN-CM run with spray"
+    try:
+        nml = {k.lower(): v for k, v in read_namelist(path).items()}
+    except OSError as exc:
+        return f"cannot read {path}: {exc}"
+    value = nml.get(SPRAY_SWITCH.lower())
+    if value is True:
+        return None
+    if value is None:
+        return f"{UWIN_NAMELIST} does not set {SPRAY_SWITCH}"
+    return f"{UWIN_NAMELIST} has {SPRAY_SWITCH} = {'.F.' if value is False else value}"
+
 
 #: Global attributes copied into STAC metadata (as ``wrf:<lowercase name>``)
 #: when present. Nothing is invented: absent attributes are simply omitted.
@@ -96,6 +132,8 @@ class _WRFState:
     # Result of the accumulated-precipitation check per time (None = passed),
     # filled by WRFAdapter.prepare() so worker processes can look it up.
     accumulation_problems: list[str | None] | None = None
+    # Why the run is considered to have no sea spray (None = spray was on).
+    spray_off_reason: str | None = None
 
 
 class WRFAdapter(ModelAdapter):
@@ -360,7 +398,8 @@ class WRFAdapter(ModelAdapter):
             time_grids=time_grids,
             adapter_state=_WRFState(slots=[e[1] for e in entries],
                                     accumulation_start=accumulation_start,
-                                    output_interval=output_interval),
+                                    output_interval=output_interval,
+                                    spray_off_reason=spray_off_reason(directory)),
         )
 
     @staticmethod
@@ -386,7 +425,13 @@ class WRFAdapter(ModelAdapter):
 
     # ---------------------------------------------------------- variables
     def supported_variables(self) -> list[str]:
-        return ["surface_wind_speed", "precipitation", "precipitation_interval"]
+        return ["surface_wind_speed", "precipitation", "precipitation_interval", *SPRAY_FIELDS]
+
+    def unavailable_variables(self, dataset: ModelDataset) -> dict[str, str]:
+        reason = dataset.adapter_state.spray_off_reason
+        if reason is None:
+            return {}
+        return {v: f"sea spray was not on: {reason}" for v in SPRAY_FIELDS}
 
     def compute(self, dataset: ModelDataset, variable: str, time_index: int) -> FieldResult | None:
         valid = dataset.valid_times[time_index]
@@ -402,6 +447,9 @@ class WRFAdapter(ModelAdapter):
             )
         if variable == "precipitation_interval":
             return self._interval_precip(dataset, time_index)
+        if variable in SPRAY_FIELDS:
+            data, prov = self._spray(dataset, time_index, variable)
+            return FieldResult(variable, data[::-1].copy(), valid, provenance=prov)
         raise VariableUnavailableError(
             f"WRF adapter does not know how to compute '{variable}'. "
             f"Supported: {', '.join(self.supported_variables())}"
@@ -438,6 +486,28 @@ class WRFAdapter(ModelAdapter):
             f"Cannot compute surface_wind_speed for {dataset.dataset_id}: the output has "
             "neither U10/V10 nor U/V."
         )
+
+    def _spray(self, dataset, t, variable):
+        reason = dataset.adapter_state.spray_off_reason
+        if reason is not None:
+            raise VariableUnavailableError(
+                f"Cannot compute {variable} for {dataset.dataset_id}: sea spray was not on "
+                f"({reason}).")
+        native, expected = SPRAY_FIELDS[variable]
+        if not self._has(dataset, t, native):
+            raise VariableUnavailableError(
+                f"Cannot compute {variable} for {dataset.dataset_id}: {native} is missing in "
+                f"{dataset.adapter_state.slots[t].path.name}.")
+        units = self._units(dataset, t, native)
+        if units != expected:
+            raise VariableUnavailableError(
+                f"{native} has units '{units}', expected '{expected}'; refusing to guess a "
+                "conversion.")
+        return self._read_2d(dataset, t, native), {
+            "source_variables": [native],
+            "method": f"{native} as written by WRF; sea spray on per {UWIN_NAMELIST} "
+                      f"({SPRAY_SWITCH} = .T.)",
+        }
 
     def _accumulated_precip(self, dataset, t):
         key = (dataset.run_id, dataset.dataset_id, t)
