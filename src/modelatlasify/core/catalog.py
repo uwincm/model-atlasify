@@ -248,10 +248,12 @@ class CatalogBuilder:
                 "title": d.title,
                 "grid": g.description,
                 "shape": [g.height, g.width],
-                "resolution_m": [abs(g.transform.a), abs(g.transform.e)],
+                ("resolution_deg" if g.crs.is_geographic else "resolution_m"):
+                    [abs(g.transform.a), abs(g.transform.e)],
                 "bbox": bbox,  # for a moving nest: everywhere it went
                 "crs_wkt2": g.crs.to_wkt(),
-                "georeference_max_error_m": round(g.max_georeference_error_m or 0.0, 3),
+                "georeference_max_error_m": (None if g.max_georeference_error_m is None
+                                             else round(g.max_georeference_error_m, 3)),
                 "n_times": len(d.valid_times),
                 "start_datetime": d.valid_times[0].strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "end_datetime": d.valid_times[-1].strftime("%Y-%m-%dT%H:%M:%SZ"),

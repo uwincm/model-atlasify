@@ -1,7 +1,9 @@
 """Quick-look PNG maps of model fields.
 
 A map shows a *view*: either a grid's whole area in the grid's own projection
-(per-item maps and "full" composites) or a lon/lat sub-area in PlateCarree.
+(per-item maps and "full" composites) or a lon/lat box in PlateCarree: a
+``--plot-sub-areas`` box, or the whole area of a grid whose projection the
+model did not record (``GridDefinition.lonlat_view_buffer_deg``).
 Fields are never resampled: in a grid's own projection they are placed with
 exactly the GeoTIFF's CRS and affine transform; elsewhere every cell is drawn
 as its true quadrilateral (pcolormesh on the projected cell corners).
@@ -26,7 +28,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from pyproj import CRS, Transformer  # noqa: E402
 
-from modelatlasify.core.areas import SubArea  # noqa: E402
+from modelatlasify.core.areas import FULL_AREA, SubArea  # noqa: E402
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
 from modelatlasify.core.variables import VariableDefinition  # noqa: E402
 
@@ -93,10 +95,38 @@ class MapView:
 
 
 def full_view(grid: GridDefinition) -> MapView:
-    """The grid's whole area in its own projection."""
+    """The grid's whole area: in its own projection, or in a lon/lat box
+    around it (plus a buffer) when ``grid.uses_lonlat_view``."""
+    if grid.uses_lonlat_view:
+        return subarea_view(lonlat_box(grid))
     xmin, ymin, xmax, ymax = grid.native_bounds
     return MapView(cartopy_projection(grid.crs), (xmin, xmax, ymin, ymax),
                    _grid_extent_m(grid), crs=grid.crs)
+
+
+def outline_lonlat(grid: GridDefinition) -> tuple[np.ndarray, np.ndarray]:
+    """The grid's closed outer edge in lon/lat (the model's true edge for a
+    resampled grid)."""
+    if grid.outline_lonlat is not None:
+        lon, lat = grid.outline_lonlat
+        return np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64)
+    lon, lat = Transformer.from_crs(grid.crs, grid.crs.geodetic_crs, always_xy=True).transform(
+        *_boundary_points(grid))
+    return np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64)
+
+
+def lonlat_box(grid: GridDefinition) -> SubArea:
+    """Lon/lat box around the grid's outer edge, widened by
+    ``grid.lonlat_view_buffer_deg`` on each side (antimeridian-safe)."""
+    lon, lat = outline_lonlat(grid)
+    lon = np.degrees(np.unwrap(np.radians(lon)))
+    b = grid.lonlat_view_buffer_deg or 0.0
+    west, east = float(lon.min()) - b, float(lon.max()) + b
+    if east - west >= 360.0:
+        west, east = -180.0, 180.0
+    shift = 360.0 * math.floor((west + 180.0) / 360.0)
+    return SubArea(FULL_AREA, west - shift, east - shift,
+                   max(float(lat.min()) - b, -90.0), min(float(lat.max()) + b, 90.0))
 
 
 def subarea_view(area: SubArea) -> MapView:
@@ -115,8 +145,9 @@ def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
     title: str, subtitle: str = "", dpi: int = 110,
 ) -> Path:
+    # In a lon/lat box the grid's edge is inside the map: outline it.
     return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
-                     dpi=dpi)
+                     outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi)
 
 
 def plot_composite(
@@ -128,11 +159,15 @@ def plot_composite(
     """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
     grids drawn on top (finest last) and their boundaries outlined in black. A
     nest with ``data=None`` is drawn as an outline only. ``domain_edge`` also
-    outlines the base grid itself, dashed."""
-    view = full_view(base[1]) if area is None else subarea_view(area)
+    outlines the base grid itself: dashed, or solid like the nests when the
+    base grid is drawn in a lon/lat box (``uses_lonlat_view``)."""
+    base_grid = base[1]
+    view = full_view(base_grid) if area is None else subarea_view(area)
+    solid_edge = base_grid.uses_lonlat_view
     return _draw_map(path, view, [base, *nests], variable, title, subtitle,
-                     outlines=[g for _, g in nests],
-                     dashed_outlines=[base[1]] if domain_edge else [], dpi=dpi)
+                     outlines=[g for _, g in nests] + ([base_grid] if solid_edge else []),
+                     dashed_outlines=[base_grid] if domain_edge and not solid_edge else [],
+                     dpi=dpi)
 
 
 def _draw_map(
@@ -182,7 +217,7 @@ def _draw_map(
     _add_geography(ax, extent_m=view.extent_m)
     for grids, style in ((outlines, "-"), (dashed_outlines, (0, (6, 4)))):
         for grid in grids:
-            bx, by = _to_view(view, grid.crs, *_boundary_points(grid))
+            bx, by = _outline_in_view(view, grid)
             ax.plot(bx, by, color="black", linewidth=1.2, linestyle=style, transform=proj,
                     zorder=3)
     try:
@@ -279,6 +314,13 @@ def _boundary_points(grid: GridDefinition, n: int = 100) -> tuple[np.ndarray, np
     return xs, ys
 
 
+def _outline_in_view(view: MapView, grid: GridDefinition) -> tuple[np.ndarray, np.ndarray]:
+    """The grid's closed outer edge in the view's projection coordinates."""
+    if grid.outline_lonlat is not None:
+        return _to_view(view, grid.crs.geodetic_crs, *outline_lonlat(grid))
+    return _to_view(view, grid.crs, *_boundary_points(grid))
+
+
 def _to_view(view: MapView, crs: CRS, xs: np.ndarray, ys: np.ndarray
              ) -> tuple[np.ndarray, np.ndarray]:
     """Points in ``crs`` -> the view's projection coordinates."""
@@ -364,8 +406,8 @@ def prefetch_geography(extent: GridDefinition | SubArea) -> None:
     """Download the Natural Earth data a map of a grid (or sub-area) needs, once,
     before parallel workers start (concurrent first downloads can corrupt the
     cache)."""
-    extent_m = (_grid_extent_m(extent) if isinstance(extent, GridDefinition)
-                else subarea_view(extent).extent_m)
+    extent_m = (full_view(extent) if isinstance(extent, GridDefinition)
+                else subarea_view(extent)).extent_m
     _load_geography(_geography_features(extent_m))
 
 

@@ -7,15 +7,20 @@ time under ``output/``. The files carry 2-D ``lon``/``lat`` but no projection
 metadata and no time variable, so:
 
 - valid times come from the file names;
-- the grid is recovered from lon/lat (see :mod:`modelatlasify.geospatial.gridfit`):
-  a Mercator grid on WRF's 6 370 km sphere (as used in UWIN-CM), true scale at
-  the equator. Mercator's radius only scales x and y together, so the choice of
-  sphere does not move anything;
+- the grid is recovered from lon/lat (see :mod:`modelatlasify.geospatial.gridfit`).
+  The candidates, in order: Mercator on WRF's 6 370 km sphere (as used in
+  UWIN-CM with a Mercator atmosphere), true scale at the equator; a regular
+  lon/lat grid; and the map projection of each WRF domain in the same run
+  directory (UWIN-CM puts the waves on the atmosphere's projection, e.g.
+  Lambert conformal). If none fits, the fields are resampled (nearest model
+  cell) onto a regular lon/lat grid, with a warning. Maps of a grid that is
+  not Mercator or lon/lat are drawn in a lon/lat box around the domain;
 - the simulation start time, if known, comes from ``namelists/main.nml``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from collections import Counter
@@ -32,6 +37,7 @@ from modelatlasify.core.errors import (DiscoveryError, GeoreferenceError, NoMode
 from modelatlasify.core.model import FieldResult, GridDefinition, ModelAdapter, ModelDataset
 from modelatlasify.core.namelist import read_namelist
 from modelatlasify.geospatial.gridfit import fit_regular_grid
+from modelatlasify.geospatial.regrid import lonlat_crs, resample_to_lonlat
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +45,9 @@ OUTPUT_PATTERN = re.compile(
     r"^umwmout_(?P<date>\d{4}-\d{2}-\d{2})_(?P<h>\d{2})[:_](?P<m>\d{2})[:_](?P<s>\d{2})(\.nc)?$")
 EARTH_RADIUS_M = 6370000.0
 DATASET_ID = "DWM"
+#: Degrees added on each side of the domain for maps drawn in a lon/lat box.
+LONLAT_VIEW_BUFFER_DEG = 1.0
+WRFOUT_GLOB = "wrfout_d[0-9][0-9]_*"
 
 #: Standard variable -> DWM output variable and the units it must have.
 FIELDS = {
@@ -149,7 +158,7 @@ class DWMAdapter(ModelAdapter):
         with netCDF4.Dataset(first, "r") as nc:
             lon = np.asarray(nc.variables["lon"][0], dtype=np.float64)
             lat = np.asarray(nc.variables["lat"][0], dtype=np.float64)
-        grid = self._grid(lon, lat)
+        grid, how, regrid_index, warnings = self._georeference(directory, lon, lat)
 
         namelist = self._namelist(directory)
         reference_time = None
@@ -166,13 +175,21 @@ class DWMAdapter(ModelAdapter):
         if diffs:
             meta["dwm:output_interval_minutes"] = diffs.most_common(1)[0][0].total_seconds() / 60
         meta["dwm:domain"] = DATASET_ID
+        meta["dwm:georeference"] = how
 
+        if regrid_index is not None:
+            size = f"resampled to {grid.width}x{grid.height}, {grid.transform.a:.3g} deg lon/lat"
+        elif grid.crs.is_geographic:
+            size = f"{grid.width}x{grid.height}, {grid.transform.a:.3g} deg lon/lat"
+        elif grid.uses_lonlat_view:
+            size = f"{grid.width}x{grid.height}, {grid.transform.a / 1000:.1f} km"
+        else:
+            size = f"{grid.width}x{grid.height}, {grid.transform.a / 1000:.1f} km at the equator"
         return ModelDataset(
             model=self.name,
             run_id=directory.resolve().name,
             dataset_id=DATASET_ID,
-            title=f"DWM wave domain ({grid.width}x{grid.height}, "
-                  f"{grid.transform.a / 1000:.1f} km at the equator)",
+            title=f"DWM wave domain ({size})",
             files=[p for _, p in entries],
             valid_times=times,
             reference_time=reference_time,
@@ -180,24 +197,76 @@ class DWMAdapter(ModelAdapter):
             metadata=meta,
             source_dir=directory,
             time_sources=[p for _, p in entries],
-            adapter_state={"south_up": bool(lat[0, 0] < lat[-1, 0])},
+            adapter_state={"south_up": bool(lat[0, 0] < lat[-1, 0]), "regrid": regrid_index},
+            warnings=warnings,
         )
 
     @staticmethod
-    def _grid(lon: np.ndarray, lat: np.ndarray) -> GridDefinition:
-        """Fit the grid as Mercator (UWIN-CM's DWM grids are Mercator)."""
+    def _wrf_projections(directory: Path) -> list[tuple[str, CRS]]:
+        """(label, CRS) of each WRF domain's map projection in ``directory``
+        (one wrfout file per domain), without repeats."""
+        from modelatlasify.models.wrf.projection import MAP_PROJ_NAMES, wrf_crs
+
+        first: dict[str, Path] = {}
+        for path in sorted(directory.glob(WRFOUT_GLOB)):
+            first.setdefault(path.name[7:10], path)  # "d01"
+        out: list[tuple[str, CRS]] = []
+        for domain, path in first.items():
+            try:
+                with netCDF4.Dataset(path, "r") as nc:
+                    attrs = {k: nc.getncattr(k) for k in nc.ncattrs()}
+                crs = wrf_crs(attrs)
+            except Exception as exc:  # noqa: BLE001 - just not a candidate
+                log.debug("No WRF projection from %s: %s", path.name, exc)
+                continue
+            if not crs.is_projected or any(crs == c for _, c in out):
+                continue
+            name = MAP_PROJ_NAMES.get(int(attrs.get("MAP_PROJ", -1)), "map")
+            out.append((f"the {name} projection of WRF {domain}", crs))
+        return out
+
+    def _georeference(self, directory: Path, lon: np.ndarray, lat: np.ndarray
+                      ) -> tuple[GridDefinition, str, np.ndarray | None, list[str]]:
+        """The DWM grid: ``(grid, how it was found, regrid index or None, warnings)``.
+
+        DWM output records no projection, so candidates are tried in turn (see
+        the module docstring). The regrid index (only when nothing fits) maps
+        each lon/lat cell to the flat index of its model cell, -1 outside.
+        """
         ny, nx = lon.shape
         lon0 = float((lon[ny // 2, nx // 2] + 180.0) % 360.0 - 180.0)
-        crs = CRS.from_proj4(f"+proj=merc +lat_ts=0 +lon_0={lon0:.6f} +x_0=0 +y_0=0 "
-                             f"+R={EARTH_RADIUS_M:.0f} +units=m +no_defs +type=crs")
-        try:
-            return fit_regular_grid(crs, lon, lat, description=(
-                f"DWM Mercator grid, {nx} x {ny} cells, on a sphere of radius "
-                f"{EARTH_RADIUS_M:.0f} m"))
-        except GeoreferenceError as exc:
-            raise GeoreferenceError(
-                f"The DWM grid is not a Mercator grid ({exc}); other grid types are not "
-                "supported yet.") from None
+        sphere = f"on a sphere of radius {EARTH_RADIUS_M:.0f} m"
+        candidates = [
+            ("Mercator", CRS.from_proj4(
+                f"+proj=merc +lat_ts=0 +lon_0={lon0:.6f} +x_0=0 +y_0=0 "
+                f"+R={EARTH_RADIUS_M:.0f} +units=m +no_defs +type=crs"), None),
+            ("a regular lon/lat grid", lonlat_crs(EARTH_RADIUS_M), None),
+            *((label, crs, LONLAT_VIEW_BUFFER_DEG)
+              for label, crs in self._wrf_projections(directory)),
+        ]
+        tried = []
+        for label, crs, buffer in candidates:
+            try:
+                grid = fit_regular_grid(crs, lon, lat, description=(
+                    f"DWM grid in {label}, {nx} x {ny} cells, {sphere}"))
+            except GeoreferenceError as exc:
+                tried.append(label)
+                log.debug("DWM grid is not regular in %s: %s", label, exc)
+                continue
+            if buffer is not None:
+                grid = dataclasses.replace(grid, lonlat_view_buffer_deg=buffer)
+            return grid, f"regular grid in {label}", None, []
+
+        grid, index = resample_to_lonlat(lon, lat, EARTH_RADIUS_M)
+        grid = dataclasses.replace(grid, lonlat_view_buffer_deg=LONLAT_VIEW_BUFFER_DEG,
+                                   description="DWM " + grid.description)
+        no_wrf = "" if len(tried) > 2 else " (no WRF output here to take a projection from)"
+        warning = (
+            f"DWM output records no projection, and the grid is not regular in any of: "
+            f"{', '.join(tried)}{no_wrf}. Its fields are resampled (each cell takes the value of the "
+            f"nearest model cell) onto a regular {grid.transform.a:.3g} x "
+            f"{-grid.transform.e:.3g} deg lon/lat grid for the GeoTIFFs and maps.")
+        return grid, "resampled (nearest model cell) to a regular lon/lat grid", index, [warning]
 
     @staticmethod
     def _namelist(directory: Path) -> dict[str, Any]:
@@ -231,10 +300,17 @@ class DWMAdapter(ModelAdapter):
         data = np.ma.filled(np.ma.asarray(var[0], dtype=np.float64), np.nan)
         if "seamask" in nc.variables:  # land is NaN already; make sure
             data[np.asarray(nc.variables["seamask"][0]) == 0] = np.nan
-        if dataset.adapter_state["south_up"]:
+        index = dataset.adapter_state.get("regrid")
+        if index is not None:  # resample onto the lon/lat grid (already north-up)
+            out = np.full(index.shape, np.nan)
+            inside = index >= 0
+            out[inside] = data.ravel()[index[inside]]
+            data = out
+        elif dataset.adapter_state["south_up"]:
             data = data[::-1].copy()
         return FieldResult(variable, data, dataset.valid_times[time_index], provenance={
             "source_variables": [native],
             "method": f"DWM output field '{native}' ({getattr(var, 'description', native)}), "
-                      "as written; land points missing",
+                      + ("resampled to the lon/lat grid (nearest model cell)" if index is not None
+                         else "as written") + "; land points missing",
         })

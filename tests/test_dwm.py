@@ -10,7 +10,7 @@ from pyproj import Transformer
 
 from conftest import T0, run_out
 from dwm_fixture import mercator_lonlat, write_dwm
-from wrf_fixture import hourly, write_wrfout
+from wrf_fixture import PROJECTIONS, grid_lonlat, hourly, true_crs, write_wrfout
 from modelatlasify.cli import main
 from modelatlasify.core.errors import NoModelOutputError
 from modelatlasify.models.dwm import DWMAdapter
@@ -143,3 +143,130 @@ def test_composite_outlines_the_wave_domain_dashed(tmp_path, monkeypatch):
     assert main([str(run), "-o", str(tmp_path / "atlas"), "--no-validate",
                  "--variables", "swh"]) == 0
     assert seen == [0, 1]  # per-item map: no edge; composite: the wave domain, dashed
+
+
+
+# ------------------------------------------- grids that are not Mercator
+LCC_DX = 50000.0
+
+
+def lambert_lonlat(nx: int = NX, ny: int = NY):
+    """South-up lon/lat of a Lambert conformal grid in the WRF fixture's
+    projection: far from Mercator or lon/lat over 2000 x 1200 km at 40N."""
+    lon, lat, _, _ = grid_lonlat(PROJECTIONS[1], nx, ny, LCC_DX, LCC_DX)
+    return lon, lat
+
+
+def test_lambert_waves_take_the_wrf_projection_of_the_run(tmp_path):
+    run = tmp_path / "coupled"
+    write_wrfout(run, hourly(T0, 2))  # Lambert conformal WRF, same projection
+    write_dwm(run, hourly(T0, 2), lonlat=lambert_lonlat())
+    adapter = DWMAdapter()
+    (ds,) = adapter.discover(run)
+    g = ds.grid
+    assert g.crs.equals(true_crs(PROJECTIONS[1]), ignore_axis_order=True)
+    assert g.transform.a == pytest.approx(LCC_DX) and g.max_georeference_error_m < 5.0
+    assert g.uses_lonlat_view and g.lonlat_view_buffer_deg == 1.0
+    assert ds.metadata["dwm:georeference"] == (
+        "regular grid in the Lambert Conformal projection of WRF d01")
+    assert ds.warnings == [] and ds.adapter_state["regrid"] is None
+    swh = adapter.compute(ds, "significant_wave_height", 1).data
+    np.testing.assert_allclose(swh[0, 5:], (1 + np.arange(NX) / NX + 1.0)[5:], rtol=1e-6)
+
+
+def test_lambert_waves_without_wrf_are_resampled_to_lonlat(tmp_path):
+    from modelatlasify.geospatial.footprint import grid_footprint
+
+    lon, lat = lambert_lonlat()
+    write_dwm(tmp_path, hourly(T0, 2), lonlat=(lon, lat))
+    adapter = DWMAdapter()
+    (ds,) = adapter.discover(tmp_path)
+    g = ds.grid
+    assert g.crs.is_geographic and g.max_georeference_error_m is None
+    assert g.lonlat_view_buffer_deg == 1.0 and g.outline_lonlat is not None
+    assert len(ds.warnings) == 1 and "resampled" in ds.warnings[0]
+    assert "no WRF output here" in ds.warnings[0]
+
+    swh = adapter.compute(ds, "significant_wave_height", 1).data
+    mwp = adapter.compute(ds, "mean_wave_period", 1).data
+    assert swh.shape == g.shape
+    # Nearest model cell, never interpolated: swh = 2 + i/NX, mwp = 5 + j/NY, i, j integers.
+    ok = np.isfinite(swh)
+    assert ok.mean() > 0.5
+    i = (swh[ok] - 2.0) * NX
+    np.testing.assert_allclose(i, np.round(i), atol=1e-3)
+    j = (mwp[np.isfinite(mwp)] - 5.0) * NY
+    np.testing.assert_allclose(j, np.round(j), atol=1e-3)
+    # The regular cell holding model cell (i=20, j=12)'s centre has its value.
+    t = g.transform
+    col = int((lon[12, 20] - t.c) // t.a)
+    row = int((lat[12, 20] - t.f) // t.e)
+    assert swh[row, col] == pytest.approx(2.0 + 20 / NX, abs=1e-5)
+    # Outside the model's curved edge (a corner of the bounding box) is missing.
+    assert np.isnan(swh[0, 0]) or np.isnan(swh[-1, 0])
+
+    # The STAC footprint follows the model's edge, not the lon/lat box.
+    fp = grid_footprint(g)
+    assert fp.bbox[0] == pytest.approx(lon.min(), abs=1.0)
+    assert fp.bbox[3] == pytest.approx(lat.max(), abs=1.0)
+
+
+def test_regular_lonlat_waves_fit_exactly(tmp_path):
+    jj, ii = np.mgrid[0:NY, 0:NX]
+    lon, lat = -120.0 + 0.5 * ii, 10.0 + 0.5 * jj
+    write_dwm(tmp_path, hourly(T0, 1), lonlat=(lon, lat))
+    (ds,) = DWMAdapter().discover(tmp_path)
+    g = ds.grid
+    assert g.crs.is_geographic and g.max_georeference_error_m < 1e-6
+    assert g.transform.a == pytest.approx(0.5) and g.transform.c == pytest.approx(-120.25)
+    assert ds.warnings == [] and ds.adapter_state["regrid"] is None
+    assert g.uses_lonlat_view and g.lonlat_view_buffer_deg is None  # its own projection
+
+
+def test_lonlat_box_view_is_the_domain_plus_a_buffer(tmp_path):
+    from modelatlasify.plotting.maps import full_view, lonlat_box
+
+    lon, lat = lambert_lonlat()
+    write_wrfout(tmp_path, hourly(T0, 1))
+    write_dwm(tmp_path, hourly(T0, 1), lonlat=(lon, lat))
+    (ds,) = DWMAdapter().discover(tmp_path)
+    box = lonlat_box(ds.grid)
+    # The outer cell edges lie half a cell (25 km) outside the centres; then 1 degree.
+    assert box.west == pytest.approx(lon.min() - 1.0, abs=0.4)
+    assert box.east == pytest.approx(lon.max() + 1.0, abs=0.4)
+    assert box.south == pytest.approx(lat.min() - 1.0, abs=0.4)
+    assert box.north == pytest.approx(lat.max() + 1.0, abs=0.4)
+    view = full_view(ds.grid)
+    assert view.crs is None  # PlateCarree, not the Lambert projection
+    assert view.extent == pytest.approx((box.west - box.center_lon, box.east - box.center_lon,
+                                         box.south, box.north))
+
+
+def test_cli_lambert_waves_without_wrf(tmp_path, capsys, monkeypatch):
+    from modelatlasify.core.validation import validate_catalog
+    from modelatlasify.plotting import maps
+
+    run = tmp_path / "w"
+    write_dwm(run, hourly(T0, 2), lonlat=lambert_lonlat())
+    calls = []
+    real = maps._draw_map
+
+    def spy(*args, **kwargs):
+        calls.append((len(kwargs.get("outlines", ())), len(kwargs.get("dashed_outlines", ()))))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(maps, "_draw_map", spy)
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--no-validate", "--variables", "swh"]) == 0
+    err = capsys.readouterr().err
+    assert "resampled to a lon/lat grid." in err
+    assert "WARNING: DWM of run '" in err and "resampled (each cell takes the value" in err
+    # The wave edge is outlined solid (like WRF domains), on item maps and composites.
+    assert calls and all(c == (1, 0) for c in calls)
+    run_dir = run_out(out, run)
+    with rasterio.open(next(run_dir.glob("items/*/significant_wave_height.tif"))) as src:
+        assert src.crs.is_geographic
+    collection = json.loads((run_dir / "collection.json").read_text())
+    (dom,) = collection["modelatlasify:domains"]
+    assert "resolution_deg" in dom and dom["georeference_max_error_m"] is None
+    assert validate_catalog(out / "catalog.json", schemas=False).ok

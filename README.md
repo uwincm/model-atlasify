@@ -32,8 +32,11 @@ line.
   (`output/umwmout_<YYYY-MM-DD_HH:MM:SS>[.nc]`; the files keep the old name), on
   its own or inside a coupled run directory. It is used automatically whenever
   that output exists. Valid times come from the file names. The grid is
-  recovered from the files' lon/lat (Mercator), and the start time comes from
-  `namelists/main.nml` when present.
+  recovered from the files' lon/lat: Mercator, regular lon/lat, or the map
+  projection of the run's WRF output (e.g. Lambert conformal). If none fits,
+  it is resampled onto a regular lon/lat grid, with a warning (see
+  [DWM grids](#dwm-grids)). The start time comes from `namelists/main.nml`
+  when present.
 - **Surface wind speed** (10 m), in m s-1
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration
@@ -145,7 +148,10 @@ domain (`full`) and a `--plot-sub-areas` box (`tepex`).
 
 Each model gets its own composites in the same folders: wave maps (e.g.
 `model-images/full/significant_wave_height/`) cover the wave model's domain, not
-the atmosphere's, and its domain edge is drawn as a dashed black line.
+the atmosphere's. On a Mercator wave grid the domain edge is drawn as a dashed
+black line. Any other wave grid (e.g. Lambert) is drawn in PlateCarree, in a
+lon/lat box 1° larger than the domain on every side, with its edge outlined in
+solid black like the WRF domains.
 
 With `--plot-sub-areas`, the same composites are also made for named lon/lat
 boxes, drawn in PlateCarree (regular lat/lon). Each cell is drawn at its true
@@ -214,6 +220,7 @@ src/modelatlasify/
 ├── geospatial/
 │   ├── geotiff.py            COG writer
 │   ├── gridfit.py            regular grid (CRS + transform) from 2-D lon/lat
+│   ├── regrid.py             nearest-cell resampling of a curvilinear grid to lon/lat
 │   └── footprint.py          lon/lat footprint + bbox (antimeridian/pole aware)
 └── plotting/
     └── maps.py               cartopy maps in the native projection
@@ -263,6 +270,32 @@ Everything after the adapter works only with model-agnostic types: a
 - STAC `bbox`/`geometry` are traced along the grid's outer cell edges. Domains
   that cross the antimeridian get a MultiPolygon and a bbox with west > east, as
   RFC 7946 requires.
+
+### DWM grids
+
+DWM output has cell-centre lon/lat but no projection. The grid is fitted with
+the same check as WRF's (every cell centre within 10% of a cell of a regular
+grid), trying in turn:
+
+1. Mercator on the 6 370 km sphere (UWIN-CM with a Mercator atmosphere);
+2. a regular lon/lat grid;
+3. the map projection of each WRF domain whose `wrfout_*` files are in the
+   same run directory. UWIN-CM puts the waves on the atmosphere's projection,
+   e.g. Lambert conformal, usually at a different resolution.
+
+The first that fits is used for the GeoTIFFs and STAC, exactly like a WRF grid.
+`dwm:georeference` in the Collection says which one it was.
+
+If none fits (e.g. a Lambert wave grid with no WRF output beside it), the
+fields are **resampled** onto a regular lon/lat grid at about the model's
+spacing, and a warning is printed. Each lon/lat cell takes the value of the
+model cell it falls in, found by inverting the model's lon/lat over its own
+cells. Values are never interpolated, and points outside the model's edge are
+missing. The STAC footprint and the map outline follow the model's true edge,
+and `georeference_max_error_m` is null.
+
+Maps of a wave grid that is not Mercator or lon/lat are drawn in PlateCarree,
+in a box around the domain's outer edge plus 1° on every side.
 
 ### Surface wind speed
 

@@ -131,12 +131,18 @@ def discover(adapters: list[ModelAdapter], inputs: list[Path], domains: list[str
         report(f"Found {models} run '{run_path}' in {directory}:")
         for d in found:
             g = d.grid
+            fit = (f"georeference fit error {g.max_georeference_error_m:.1f} m"
+                   if g.max_georeference_error_m is not None else "resampled to a lon/lat grid")
             report(
                 f"  {d.dataset_id}: {len(d.files)} file(s), {len(d.valid_times)} time(s) "
                 f"{d.valid_times[0]:%Y-%m-%d %H:%M} -> {d.valid_times[-1]:%Y-%m-%d %H:%M} UTC, "
-                f"{g.width}x{g.height} grid, georeference fit error {g.max_georeference_error_m:.1f} m"
+                f"{g.width}x{g.height} grid, {fit}"
                 + (f", moving nest ({len(d.distinct_grids())} positions)." if d.moving else ".")
             )
+        for d in found:
+            for warning in d.warnings:
+                label = d.model if d.dataset_id == d.model else f"{d.model} {d.dataset_id}"
+                report(f"WARNING: {label} of run '{run_path}': {warning}")
     return runs
 
 
