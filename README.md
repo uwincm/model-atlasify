@@ -41,6 +41,9 @@ line.
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration
   - accumulated over each output interval
+- **OLR with interval precipitation** (WRF, when the output has `OLR`):
+  outgoing longwave radiation (W m-2) in reversed greyscale, with the interval
+  precipitation drawn on top
 - **Sea spray** (WRF in UWIN-CM runs with spray on): spray mass flux
   (kg m-2 s-1, logarithmic colour scale), spray-mediated latent and sensible
   heat flux (W m-2)
@@ -110,6 +113,7 @@ atlas/
     │   │   ├── precipitation/
     │   │   │   └── uwincm.full.precipitation.20261006T010000Z.png
     │   │   ├── precipitation_interval/
+    │   │   ├── olr_precipitation/            # OLR with interval precipitation on top
     │   │   └── surface_wind_speed/
     │   └── gulf/                             # a --plot-sub-areas area (lon/lat map)
     │       └── precipitation/ ...            #   uwincm.gulf.precipitation.<time>.png
@@ -214,7 +218,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`), or `s3://bucket/prefix` to write to S3 (see [Output to S3](#output-to-s3)). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf` or `dwm` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
-| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), `olr` (= `olr_precipitation`, which also makes `precipitation_interval` for its overlay), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
 | `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
@@ -362,6 +366,22 @@ in a box around the domain's outer edge plus 1° on every side.
     Larger negative differences are set to missing and counted.
   - The interval product is undefined at the first output time.
   - The asset carries `start_datetime`/`end_datetime`.
+
+### OLR with interval precipitation
+
+- `olr_precipitation` = WRF `OLR` (top-of-atmosphere outgoing longwave
+  radiation), instantaneous, in W m-2. Units other than `W m-2` are an error.
+  The GeoTIFF holds OLR only.
+- Its maps draw OLR in reversed greyscale spread over 80–300 W m-2, so cold
+  cloud tops are white and 240 W m-2 is dark grey rather than black. OLR above
+  240 W m-2 (mostly clear sky) is drawn transparent, so the map background and
+  coastlines show through. The `precipitation_interval` product of the same
+  time and domain is drawn on top, in its usual colours. Each field has its own
+  colour bar.
+- At the first output time there is no interval precipitation, so the map
+  shows OLR alone.
+- A run whose output has no `OLR` skips this product. You get a warning only if
+  you asked for it with `--variables`.
 
 ### Sea spray
 

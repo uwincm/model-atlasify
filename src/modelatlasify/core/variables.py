@@ -27,6 +27,11 @@ class VariableDefinition:
     extend: str = "max"
     # Values at or below this are drawn transparent (e.g. no rain).
     transparent_below: float | None = None
+    # Values above this are drawn transparent (e.g. clear-sky OLR), on maps only.
+    transparent_above: float | None = None
+    # Another variable drawn on top of this one on maps (e.g. precipitation over
+    # OLR). Maps only: the GeoTIFF holds this variable's own data.
+    overlay: str | None = None
     # A spatially constant field (e.g. wind identically 0) almost always means
     # zero-filled/corrupt input. False for fields that are legitimately
     # constant sometimes (precipitation is all 0 at initialization).

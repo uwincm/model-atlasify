@@ -163,3 +163,24 @@ def test_no_full_plots_keeps_sub_areas_and_item_maps(tmp_path):
     assert not (images / "full").exists()
     assert len(list(images.glob("zoom/surface_wind_speed/*.png"))) == 2
     assert len(list(run_out(out, run).glob("items/*/surface_wind_speed.png"))) == 2
+
+
+def test_olr_precipitation_maps(tmp_path, capsys):
+    include = ("U10", "V10", "RAINC", "RAINNC", "OLR")
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 3), include=include)
+    write_wrfout(run, hourly(T0, 3), domain=2, nx=20, ny=16, dx=4000.0, include=include)
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--variables", "olr", "--no-validate"]) == 0
+    assert "Also making precipitation_interval" in capsys.readouterr().err
+
+    item = sorted(run_out(out, run).glob("items/d01-*"))[-1]
+    assert {p.name for p in item.iterdir() if p.suffix in (".tif", ".png")} == {
+        "olr_precipitation.tif", "olr_precipitation.png",
+        "precipitation_interval.tif", "precipitation_interval.png"}
+    images = run_out(out, run) / "model-images" / "full"
+    olr = sorted(p.name for p in (images / "olr_precipitation").glob("*.png"))
+    assert len(olr) == 3  # also at the first time, without precipitation on top
+    assert (images / "olr_precipitation.html").is_file()
+    summary = (run_out(out, run) / "model-images.html").read_text(encoding="utf-8")
+    assert "Outgoing longwave radiation" in summary

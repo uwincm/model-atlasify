@@ -86,6 +86,42 @@ PRECIPITATION_INTERVAL = register(
     )
 )
 
+#: OLR colour scale: reversed greyscale spread over OLR_FULL_RANGE (white =
+#: cold cloud tops), of which only up to OLR_CLEAR is drawn; above it is drawn
+#: transparent so the map background shows through clear sky.
+OLR_FULL_RANGE = (80.0, 300.0)
+OLR_CLEAR = 240.0
+
+
+def get_colormap_olr():
+    """``gray_r`` over OLR_FULL_RANGE, cut at OLR_CLEAR (for vmin..OLR_CLEAR)."""
+    lo, hi = OLR_FULL_RANGE
+    top = (OLR_CLEAR - lo) / (hi - lo)
+    return colors.LinearSegmentedColormap.from_list(
+        "olr_gray_r", plt.cm.gray_r(np.linspace(0.0, top, 256)), N=256)
+
+
+OLR_PRECIPITATION = register(
+    VariableDefinition(
+        name="olr_precipitation",
+        long_name="Outgoing longwave radiation",
+        units="W m-2",
+        standard_name="toa_outgoing_longwave_flux",
+        description=(
+            "Outgoing longwave radiation at the top of the atmosphere, instantaneous at "
+            "the valid time. Maps overlay precipitation_interval."
+        ),
+        cmap=get_colormap_olr(),
+        vmin=OLR_FULL_RANGE[0],
+        vmax=OLR_CLEAR,
+        extend="min",
+        transparent_above=OLR_CLEAR,
+        overlay="precipitation_interval",
+        max_zero_fraction=0.01,
+        aliases=("olr", "olr_precip"),
+    )
+)
+
 #: Differences more negative than this (mm) are treated as a broken accumulation
 #: (e.g. a reset) rather than float round-off.
 NEGATIVE_TOLERANCE_MM = 0.01
