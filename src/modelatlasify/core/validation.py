@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pystac
 
+from modelatlasify.core import storage
+
 
 @dataclass
 class ValidationReport:
@@ -20,20 +22,37 @@ class ValidationReport:
         return not self.missing_hrefs and not self.schema_errors
 
 
+def _open_catalog(catalog_path: Path) -> pystac.Catalog:
+    return pystac.Catalog.from_file(str(catalog_path), stac_io=storage.FsspecStacIO())
+
+
 def check_links(catalog_path: Path) -> tuple[int, list[str]]:
     """Resolve every child/item link and asset href; return objects seen and missing files."""
-    catalog = pystac.Catalog.from_file(str(catalog_path))
+    catalog = _open_catalog(catalog_path)
     missing: list[str] = []
     n = 1
     for child in catalog.get_children():
         n += 1
+        existing = _existing_objects(child.get_self_href())
         for item in child.get_items(recursive=True):
             n += 1
             for key, asset in item.assets.items():
-                href = Path(asset.get_absolute_href())
-                if not href.is_file():
+                href = asset.get_absolute_href()
+                found = (href in existing if existing is not None
+                         else storage.as_path(href).is_file())
+                if not found:
                     missing.append(f"{item.id}:{key} -> {href}")
     return n, missing
+
+
+def _existing_objects(collection_href: str) -> set[str] | None:
+    """For a collection on S3, every object under its folder, listed once (one
+    request per asset would be slow); None for local files."""
+    if not storage.is_remote(collection_href):
+        return None
+    folder = storage.as_path(collection_href).parent
+    storage.refresh(folder)
+    return {f"{storage.S3_PREFIX}{key}" for key in folder.fs.find(folder.path)}
 
 
 def validate_schemas(catalog_path: Path) -> list[str]:
@@ -42,7 +61,7 @@ def validate_schemas(catalog_path: Path) -> list[str]:
     Requires ``jsonschema``; extension schemas are fetched over HTTP by pystac.
     Raises ``ConnectionError``-like exceptions if schemas cannot be fetched.
     """
-    catalog = pystac.Catalog.from_file(str(catalog_path))
+    catalog = _open_catalog(catalog_path)
     errors: list[str] = []
     objs = [catalog]
     for child in catalog.get_children():

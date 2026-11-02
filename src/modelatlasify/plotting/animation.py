@@ -5,7 +5,7 @@ its PNGs in time order as a looping animation. ``model-images.html``, next to
 ``model-images/``, is a table of the latest map of every variable (rows) and
 plot area (columns), each linking to its animation. The pages are
 self-contained (inline CSS and JavaScript, images referenced by relative
-path), so they work from ``file://`` as well as from a web server.
+path), so they work from ``file://`` as well as from a web server or S3.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from modelatlasify.core import storage
 from modelatlasify.core.areas import FULL_AREA
 from modelatlasify.core.variables import all_variables, get_variable
 
@@ -37,7 +38,8 @@ def write_animation(var_dir: Path) -> Path | None:
     the same output are included. Returns the page, or None if there are no
     frames.
     """
-    frames = sorted(var_dir.glob("*.png"))  # the time stamp in the name sorts them
+    storage.refresh(var_dir)  # S3: worker processes wrote the frames
+    frames = sorted(var_dir.glob("*.png"), key=lambda p: p.name)  # time stamps sort them
     if not frames:
         return None
     long_name = _long_name(var_dir.name)
@@ -47,7 +49,7 @@ def write_animation(var_dir: Path) -> Path | None:
     page = (_TEMPLATE.replace("__TITLE__", html.escape(title))
             .replace("__FRAMES__", json.dumps(data, indent=1).replace("</", "<\\/")))
     path = var_dir.parent / f"{var_dir.name}.html"
-    path.write_text(page, encoding="utf-8")
+    storage.write_text(path, page)
     return path
 
 
@@ -66,6 +68,7 @@ def write_summary(images_dir: Path) -> Path | None:
     shows the variable's latest map in that area and links to its animation.
     Returns the page, or None if there are no maps.
     """
+    storage.refresh(images_dir)
     if not images_dir.is_dir():
         return None
     cells: dict[tuple[str, str], Path] = {}  # (area, variable) -> latest frame
@@ -73,7 +76,8 @@ def write_summary(images_dir: Path) -> Path | None:
         if not area_dir.is_dir():
             continue
         for var_dir in area_dir.iterdir():
-            frames = sorted(var_dir.glob("*.png")) if var_dir.is_dir() else []
+            frames = (sorted(var_dir.glob("*.png"), key=lambda p: p.name)
+                      if var_dir.is_dir() else [])
             if frames:
                 cells[(area_dir.name, var_dir.name)] = frames[-1]
     if not cells:
@@ -102,7 +106,7 @@ def write_summary(images_dir: Path) -> Path | None:
     page = (_SUMMARY_TEMPLATE.replace("__TITLE__", esc(title))
             .replace("__ROWS__", "\n".join(rows)))
     path = images_dir.parent / f"{images_dir.name}.html"
-    path.write_text(page, encoding="utf-8")
+    storage.write_text(path, page)
     return path
 
 

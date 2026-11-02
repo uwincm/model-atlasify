@@ -51,6 +51,8 @@ line.
 - **PNG maps** in the native projection
 - **STAC catalog generation** (Catalog → Collection per run → Item per domain
   and valid time), validated against the STAC JSON schemas
+- **Output to S3**: `-o s3://bucket/prefix` writes everything straight to the
+  bucket (see [Output to S3](#output-to-s3))
 - **Interactive CLI**: runs, reports progress, and exits
 
 ## Install
@@ -169,6 +171,36 @@ reported and skipped.
 The catalog is *self-contained*: all links are relative, so you can move or
 upload the whole `atlas/` directory as is.
 
+### Output to S3
+
+Give an S3 location instead of a directory to write the atlas straight to a
+bucket:
+
+```bash
+modelatlasify /data/wrf/run01 -o s3://my-bucket/atlas -np 8
+```
+
+- **Nothing is staged on local disk.** GeoTIFFs and maps are built in memory and
+  uploaded with [s3fs](https://s3fs.readthedocs.io), including from the
+  parallel workers. The layout under the prefix is the same as in a local
+  output directory, and runs accumulate in its `catalog.json` in the same way.
+- **Credentials come from your AWS login, never from the command line.** Use
+  any of these:
+  - `aws configure` (access keys) or `aws sso login` (SSO), with
+    `AWS_PROFILE=<name>` for a non-default profile;
+  - the environment variables `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+    (plus `AWS_SESSION_TOKEN` for temporary credentials).
+- **Access is checked before any processing.** ModelAtlasify writes and
+  deletes a small probe object under the prefix. If there are no credentials,
+  if they may not write there (or have expired), or if the bucket does not
+  exist, it stops with a message saying how to authenticate.
+- **Objects get a Content-Type** (`image/png`, `text/html`, `application/json`,
+  `image/tiff; application=geotiff; profile=cloud-optimized`), so pages and
+  maps display in a browser if the bucket or a CDN serves them. ModelAtlasify
+  does not change bucket policies or object ACLs.
+- **Link checks** list the run's objects once rather than requesting each
+  asset.
+
 ### Options
 
 ```text
@@ -180,7 +212,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | option | meaning |
 |---|---|
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
-| `-o, --output` | Output directory (default `./atlas`). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
+| `-o, --output` | Output directory (default `./atlas`), or `s3://bucket/prefix` to write to S3 (see [Output to S3](#output-to-s3)). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf` or `dwm` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
 | `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
@@ -205,6 +237,7 @@ src/modelatlasify/
 │   ├── processing.py         pipeline: discover → compute → sanity-check → GeoTIFF/PNG → STAC
 │   ├── catalog.py            STAC Catalog/Collection/Item construction (pystac)
 │   ├── validation.py         link checks + STAC JSON-schema validation
+│   ├── storage.py            local or S3 output (s3fs): writes, Content-Types, access check
 │   └── errors.py             user-facing exceptions
 ├── models/
 │   ├── wrf/
@@ -422,6 +455,8 @@ Coverage:
 - the CLI, including error cases
 
 The schema-validation test downloads STAC schemas and is skipped when offline.
+The S3 output tests run against a local mock S3 server ([moto](https://docs.getmoto.org)),
+so no AWS account is needed.
 
 To try a real run, point the CLI at any directory of `wrfout_d0*` files. No
 WRF data is committed to this repository.
@@ -433,8 +468,7 @@ This is a prototype. It does **not** yet provide:
 - daemon/service operation, scheduling, or automatic monitoring of model
   directories
 - a web UI, HTTP serving, or interactive web maps
-- a database or cloud deployment (output is plain files; the self-contained
-  catalog can be uploaded to object storage as is)
+- a database (output is plain files, locally or on S3)
 - broad model support (WRF only; no coupled ocean/wave components yet)
 - complete WRF variable support (only 10 m wind speed, precipitation and sea
   spray), or

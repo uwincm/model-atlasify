@@ -20,6 +20,8 @@ dependencies = [
     "cartopy",
     "pystac",
     "tqdm",
+    "s3fs",
+    "universal_pathlib",
 ]
 
 [project.optional-dependencies]
@@ -59,6 +61,8 @@ cartopy = ">=0.23"
 pystac = ">=1.10"
 tqdm = ">=4.60"
 jsonschema = ">=4.0"
+s3fs = ">=2024.1"  # -o s3://bucket/prefix
+universal_pathlib = ">=0.2.5"
 
 [tool.pixi.pypi-dependencies]
 modelatlasify = { path = ".", editable = true }
@@ -66,6 +70,10 @@ modelatlasify = { path = ".", editable = true }
 [tool.pixi.feature.test.dependencies]
 pytest = ">=8"
 gdal = ">=3.6"  # provides gdalinfo for checking GeoTIFFs like a GIS tool would
+moto = ">=5.0"  # mock S3 server for the S3 output tests
+flask = "*"  # moto's server mode
+flask-cors = "*"
+boto3 = "*"
 
 [tool.pixi.environments]
 default = { features = ["test"], solve-group = "default" }

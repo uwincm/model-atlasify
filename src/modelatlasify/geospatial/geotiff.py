@@ -11,6 +11,7 @@ import rasterio
 import rasterio.shutil
 from rasterio.io import MemoryFile
 
+from modelatlasify.core import storage
 from modelatlasify.core.model import FieldResult, GridDefinition
 from modelatlasify.core.variables import VariableDefinition
 
@@ -65,10 +66,10 @@ def write_geotiff(
         driver="GTiff", width=grid.width, height=grid.height, count=1, dtype=DTYPE,
         crs=grid.crs, transform=grid.transform, nodata=NODATA,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Write to memory, then translate to a COG (tiled, overviews, internal
-    # compression) so the files are ready for HTTP range requests later.
-    with MemoryFile() as mem:
+    # compression) so the files are ready for HTTP range requests later. The
+    # COG is built in memory too and written (or uploaded to S3) in one go.
+    with MemoryFile() as mem, MemoryFile(ext=".tif") as cog:
         with mem.open(**profile) as dst:
             dst.write(data, 1)
             dst.set_band_description(1, variable.name)
@@ -77,9 +78,11 @@ def write_geotiff(
             dst.update_tags(AREA_OR_POINT="Area", model_grid=grid.description)
         with mem.open() as src:
             rasterio.shutil.copy(
-                src, path, driver="COG", compress="DEFLATE", predictor="FLOATING_POINT",
+                src, cog.name, driver="COG", compress="DEFLATE", predictor="FLOATING_POINT",
                 blocksize=512, overview_resampling="average",
             )
+        cog.seek(0)
+        storage.write_bytes(path, cog.read())
 
     finite = data[np.isfinite(data)]
     stats = (

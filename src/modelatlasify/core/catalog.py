@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import posixpath
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,6 +37,7 @@ from pystac.extensions.projection import ProjectionExtension
 from pystac.extensions.raster import DataType, RasterBand, RasterExtension, Statistics
 
 from modelatlasify import __version__
+from modelatlasify.core import storage
 from modelatlasify.core.model import FieldResult, ModelDataset
 from modelatlasify.core.variables import get_variable
 from modelatlasify.geospatial.footprint import Footprint, grid_footprint
@@ -117,7 +118,8 @@ def _union_bbox(bboxes: list[list[float]]) -> list[float]:
 
 class CatalogBuilder:
     def __init__(self, output_dir: Path, title: str = "ModelAtlasify catalog"):
-        self.output_dir = Path(output_dir).resolve()
+        # A local directory (made absolute) or an s3:// prefix (a UPath).
+        self.output_dir = storage.output_root(output_dir)
         self.catalog = pystac.Catalog(
             id=CATALOG_ID,
             title=title,
@@ -334,7 +336,8 @@ class CatalogBuilder:
         self.catalog.set_self_href(str(path))
         # Children and items already have explicit self hrefs; keep them.
         self.catalog.make_all_asset_hrefs_relative()
-        self.catalog.save(catalog_type=pystac.CatalogType.SELF_CONTAINED)
+        self.catalog.save(catalog_type=pystac.CatalogType.SELF_CONTAINED,
+                          stac_io=storage.FsspecStacIO())  # local files or S3
         if previous:
             self._merge_children(path, previous)
         return path
@@ -344,24 +347,24 @@ class CatalogBuilder:
         if not path.is_file():
             return []
         try:
-            links = json.loads(path.read_text()).get("links", [])
+            links = json.loads(storage.read_text(path)).get("links", [])
         except (OSError, ValueError) as exc:
             log.warning("Existing %s is unreadable (%s); it is replaced.", path, exc)
             return []
         return [ln for ln in links
                 if ln.get("rel") == "child" and isinstance(ln.get("href"), str)
-                and (path.parent / ln["href"]).is_file()]
+                and (path.parent / posixpath.normpath(ln["href"])).is_file()]
 
     @staticmethod
     def _merge_children(path: Path, previous: list[dict]) -> None:
         """Keep previously cataloged collections: old children first, in their
         order, then this run's new ones. Targets are compared by resolved path."""
-        def key(link: dict) -> str:
-            return os.path.normpath(path.parent / link["href"])
+        def key(link: dict) -> str:  # hrefs are relative to the same catalog.json
+            return posixpath.normpath(link["href"])
 
-        cat = json.loads(path.read_text())
+        cat = json.loads(storage.read_text(path))
         current = [ln for ln in cat["links"] if ln.get("rel") == "child"]
         old_keys = {key(ln) for ln in previous}
         children = previous + [ln for ln in current if key(ln) not in old_keys]
         cat["links"] = [ln for ln in cat["links"] if ln.get("rel") != "child"] + children
-        path.write_text(json.dumps(cat, indent=2))
+        storage.write_text(path, json.dumps(cat, indent=2))
