@@ -22,7 +22,7 @@ from pyproj import CRS
 
 @dataclass(frozen=True)
 class GridDefinition:
-    """A regular grid in a projected CRS.
+    """A regular grid in a projected (or geographic lon/lat) CRS.
 
     ``data`` arrays handed to the rest of the pipeline are always oriented
     north-up (row 0 is the northernmost row), matching ``transform``, which
@@ -38,7 +38,23 @@ class GridDefinition:
     lat: np.ndarray | None = None  # degrees north
     lon: np.ndarray | None = None  # degrees east in [-180, 180)
     description: str = ""
-    max_georeference_error_m: float | None = None
+    max_georeference_error_m: float | None = None  # None: not fitted (e.g. resampled)
+    #: Draw whole-grid maps in a lon/lat (PlateCarree) box around the grid,
+    #: widened by this many degrees on each side, instead of in the grid's own
+    #: projection (used when the projection was not recorded by the model).
+    #: None = own projection; grids in a geographic CRS always get a lon/lat box.
+    lonlat_view_buffer_deg: float | None = None
+    #: The model's true outer edge as a closed (lon, lat) ring, when this grid
+    #: is a resampling of a model grid that is not regular in any known
+    #: projection. None = the grid's own outer edge.
+    outline_lonlat: tuple[np.ndarray, np.ndarray] | None = field(
+        default=None, compare=False, repr=False)
+
+    @property
+    def uses_lonlat_view(self) -> bool:
+        """Whether whole-grid maps are drawn in a lon/lat box (see
+        ``lonlat_view_buffer_deg``)."""
+        return self.lonlat_view_buffer_deg is not None or self.crs.is_geographic
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -117,6 +133,9 @@ class ModelDataset:
     time_grids: list[GridDefinition] | None = field(default=None, repr=False)
     #: Opaque, adapter-private bookkeeping (e.g. which file/index holds each time).
     adapter_state: Any = field(default=None, repr=False)
+    #: Things the user should know about this dataset (e.g. it was resampled),
+    #: reported as warnings when it is discovered.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def run_name(self) -> str:

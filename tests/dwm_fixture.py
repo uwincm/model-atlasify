@@ -33,14 +33,23 @@ def mercator_lonlat(nx: int, ny: int, dx: float, cen_lon: float, cen_lat: float)
 def write_dwm(run_dir: Path, times: list[datetime], *, nx: int = 40, ny: int = 24,
                dx: float = 50000.0, cen_lon: float = 180.0, cen_lat: float = 5.0,
                start: datetime | None = None, namelist: bool = True,
-               suffix: str = ".nc") -> list[Path]:
-    """Fields (south-up, i = column, j = row):
+               suffix: str = ".nc", lonlat: tuple[np.ndarray, np.ndarray] | None = None
+               ) -> list[Path]:
+    """``lonlat`` = south-up (lon, lat) cell centres of another grid (e.g.
+    Lambert conformal) to write instead of the Mercator grid; nx/ny then come
+    from its shape.
+
+    Fields (south-up, i = column, j = row):
     swh = 1 + i / nx + hours since start; mwp = 5 + j / ny; dwp = 8 + i / nx.
     Columns 0-4 of rows 0-4 are land (NaN, seamask 0)."""
     out = run_dir / "output"
     out.mkdir(parents=True, exist_ok=True)
     start = start or times[0]
-    lon, lat, _, _ = mercator_lonlat(nx, ny, dx, cen_lon, cen_lat)
+    if lonlat is None:
+        lon, lat, _, _ = mercator_lonlat(nx, ny, dx, cen_lon, cen_lat)
+    else:
+        lon, lat = lonlat
+        ny, nx = lon.shape
     jj, ii = np.mgrid[0:ny, 0:nx]
     land = (ii < 5) & (jj < 5)
     paths = []

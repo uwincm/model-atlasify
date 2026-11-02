@@ -38,11 +38,14 @@ def _edge_points(grid: GridDefinition, n_per_edge: int) -> tuple[np.ndarray, np.
 
 
 def grid_footprint(grid: GridDefinition, n_per_edge: int = 100, precision: int = 6) -> Footprint:
-    xs, ys = _edge_points(grid, n_per_edge)
-    to_lonlat = Transformer.from_crs(grid.crs, grid.crs.geodetic_crs, always_xy=True)
-    lon, lat = to_lonlat.transform(xs, ys)
-    lon = np.asarray(lon)
-    lat = np.asarray(lat)
+    if grid.outline_lonlat is not None:  # a resampled grid: the model's true edge
+        lon, lat = (np.asarray(a, dtype=np.float64)[:-1] for a in grid.outline_lonlat)
+    else:
+        xs, ys = _edge_points(grid, n_per_edge)
+        to_lonlat = Transformer.from_crs(grid.crs, grid.crs.geodetic_crs, always_xy=True)
+        lon, lat = to_lonlat.transform(xs, ys)
+        lon = np.asarray(lon)
+        lat = np.asarray(lat)
 
     # Unwrap the ring so consecutive vertices never jump by ~360 degrees.
     unwrapped = np.degrees(np.unwrap(np.radians(lon)))
