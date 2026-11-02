@@ -117,7 +117,6 @@ OLR_PRECIPITATION = register(
         extend="min",
         transparent_above=OLR_CLEAR,
         overlay="precipitation_interval",
-        max_zero_fraction=0.01,
         aliases=("olr", "olr_precip"),
     )
 )

@@ -311,3 +311,21 @@ def test_olr_alias_and_overlay():
     assert resolve_names(["olr"]) == ["olr_precipitation"]
     assert "olr_precipitation" not in resolve_names(["precipitation"])
     assert get_variable("olr_precipitation").overlay == "precipitation_interval"
+
+
+def test_olr_zeros_are_missing_and_mostly_zero_is_rejected(tmp_path):
+    import netCDF4
+
+    run = tmp_path / "r"
+    paths = write_wrfout(run, hourly(T0, 2), include=("OLR",))
+    with netCDF4.Dataset(paths[0], "a") as nc:  # initialization: radiation not run yet
+        nc["OLR"][0] = 0.0
+    with netCDF4.Dataset(paths[1], "a") as nc:  # a moving nest's new edge columns
+        nc["OLR"][0, :, -1] = 0.0
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(run)
+    with pytest.raises(FieldQualityError, match="exactly 0"):
+        adapter.compute(ds, "olr_precipitation", 0)
+    f = adapter.compute(ds, "olr_precipitation", 1)
+    assert np.isnan(f.data[:, -1]).all() and np.isfinite(f.data[:, :-1]).all()
+    assert f.provenance["n_zero_set_missing"] == ds.grid.height

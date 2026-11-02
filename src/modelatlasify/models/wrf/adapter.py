@@ -42,6 +42,11 @@ MAX_DECREASE_FRACTION_MOVING = 0.2
 WRFOUT_PATTERN = re.compile(r"^wrfout_d(?P<domain>\d{2})_(?P<time>\d{4}-\d{2}-\d{2}_\d{2}[:_]\d{2}[:_]\d{2})")
 WRF_TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 
+#: OLR that is exactly 0 at more than this fraction of points is rejected
+#: (radiation has not run yet, e.g. at initialization); fewer zeros, e.g. the
+#: edge rows/columns a moving nest just moved into, are set to missing.
+MAX_OLR_ZERO_FRACTION = 0.10
+
 #: Sea spray product -> WRF output variable and the units it must have. WRF
 #: writes these whether or not spray is on (zeros when off), so whether spray
 #: was on comes from the coupler's uwin.nml (see ``spray_off_reason``).
@@ -533,10 +538,25 @@ class WRFAdapter(ModelAdapter):
         if units.replace(" ", "") not in ("Wm-2", "Wm{-2}"):
             raise VariableUnavailableError(
                 f"OLR has units '{units}', expected 'W m-2'; refusing to guess a conversion.")
-        return self._read_2d(dataset, t, "OLR"), {
+        olr = self._read_2d(dataset, t, "OLR")
+        # OLR is never 0 in reality. WRF leaves 0 where radiation has not run:
+        # everywhere at initialization, and in the rows/columns a moving nest
+        # just moved into (until the next radiation step). Those are missing.
+        zero = olr == 0.0
+        frac = float(zero.mean())
+        if frac > MAX_OLR_ZERO_FRACTION:
+            raise FieldQualityError(
+                f"OLR is exactly 0 at {100 * frac:.1f}% of grid points (radiation has not run "
+                "yet, or the input is zero-filled)")
+        olr[zero] = np.nan
+        prov = {
             "source_variables": ["OLR"],
-            "method": "OLR (top-of-atmosphere outgoing longwave flux) as written by WRF",
+            "method": "OLR (top-of-atmosphere outgoing longwave flux) as written by WRF; "
+                      "exact zeros (radiation not yet computed there) set to missing",
         }
+        if zero.any():
+            prov["n_zero_set_missing"] = int(zero.sum())
+        return olr, prov
 
     def _accumulated_precip(self, dataset, t):
         key = (dataset.run_id, dataset.dataset_id, t)
