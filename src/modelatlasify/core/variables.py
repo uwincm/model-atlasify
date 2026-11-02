@@ -32,6 +32,11 @@ class VariableDefinition:
     # Another variable drawn on top of this one on maps (e.g. precipitation over
     # OLR). Maps only: the GeoTIFF holds this variable's own data.
     overlay: str | None = None
+    # A map-only product: no data or GeoTIFF of its own; its maps draw this
+    # other variable's field, in that variable's style (plus ``overlay``).
+    draws: str | None = None
+    # False = GeoTIFF only, no maps of its own (e.g. OLR, mapped as olr_precipitation).
+    maps: bool = True
     # A spatially constant field (e.g. wind identically 0) almost always means
     # zero-filled/corrupt input. False for fields that are legitimately
     # constant sometimes (precipitation is all 0 at initialization).

@@ -439,7 +439,7 @@ class WRFAdapter(ModelAdapter):
     # ---------------------------------------------------------- variables
     def supported_variables(self) -> list[str]:
         return ["surface_wind_speed", "precipitation", "precipitation_interval",
-                "olr_precipitation", *SPRAY_FIELDS]
+                "olr", "olr_precipitation", *SPRAY_FIELDS]
 
     def unavailable_variables(self, dataset: ModelDataset) -> dict[str, str]:
         out = {}
@@ -447,7 +447,7 @@ class WRFAdapter(ModelAdapter):
         if reason is not None:
             out.update({v: f"sea spray was not on: {reason}" for v in SPRAY_FIELDS})
         if dataset.adapter_state.olr_missing_reason is not None:
-            out["olr_precipitation"] = dataset.adapter_state.olr_missing_reason
+            out["olr"] = out["olr_precipitation"] = dataset.adapter_state.olr_missing_reason
         return out
 
     def compute(self, dataset: ModelDataset, variable: str, time_index: int) -> FieldResult | None:
@@ -464,7 +464,7 @@ class WRFAdapter(ModelAdapter):
             )
         if variable == "precipitation_interval":
             return self._interval_precip(dataset, time_index)
-        if variable == "olr_precipitation":
+        if variable == "olr":
             data, prov = self._olr(dataset, time_index)
             return FieldResult(variable, data[::-1].copy(), valid, provenance=prov)
         if variable in SPRAY_FIELDS:
@@ -532,7 +532,7 @@ class WRFAdapter(ModelAdapter):
     def _olr(self, dataset, t):
         if not self._has(dataset, t, "OLR"):
             raise VariableUnavailableError(
-                f"Cannot compute olr_precipitation for {dataset.dataset_id}: OLR is missing in "
+                f"Cannot compute olr for {dataset.dataset_id}: OLR is missing in "
                 f"{dataset.adapter_state.slots[t].path.name}.")
         units = self._units(dataset, t, "OLR")
         if units.replace(" ", "") not in ("Wm-2", "Wm{-2}"):

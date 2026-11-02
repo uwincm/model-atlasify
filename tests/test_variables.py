@@ -281,8 +281,8 @@ def test_olr(tmp_path):
     write_wrfout(run, hourly(T0, 2), include=("RAINC", "RAINNC", "OLR"))
     adapter = WRFAdapter()
     (ds,) = adapter.discover(run)
-    assert "olr_precipitation" in adapter.dataset_variables(ds)
-    f = adapter.compute(ds, "olr_precipitation", 1)
+    assert {"olr", "olr_precipitation"} <= set(adapter.dataset_variables(ds))
+    f = adapter.compute(ds, "olr", 1)
     nx = ds.grid.width
     np.testing.assert_allclose(
         f.data, np.broadcast_to(100.0 + 150.0 * np.arange(nx) / nx, f.data.shape), rtol=1e-6)
@@ -292,8 +292,9 @@ def test_olr(tmp_path):
 def test_olr_unavailable_without_olr(wrf_run):
     adapter = WRFAdapter()
     (ds,) = adapter.discover(wrf_run)
-    assert "no OLR" in adapter.unavailable_variables(ds)["olr_precipitation"]
-    assert "olr_precipitation" not in adapter.dataset_variables(ds)
+    unavailable = adapter.unavailable_variables(ds)
+    assert "no OLR" in unavailable["olr"] and "no OLR" in unavailable["olr_precipitation"]
+    assert not {"olr", "olr_precipitation"} & set(adapter.dataset_variables(ds))
 
 
 def test_olr_units_are_checked(tmp_path):
@@ -302,15 +303,17 @@ def test_olr_units_are_checked(tmp_path):
     adapter = WRFAdapter()
     (ds,) = adapter.discover(run)
     with pytest.raises(VariableUnavailableError, match="expected 'W m-2'"):
-        adapter.compute(ds, "olr_precipitation", 0)
+        adapter.compute(ds, "olr", 0)
 
 
 def test_olr_alias_and_overlay():
     from modelatlasify.core.variables import get_variable
 
-    assert resolve_names(["olr"]) == ["olr_precipitation"]
+    assert resolve_names(["olr"]) == ["olr", "olr_precipitation"]
     assert "olr_precipitation" not in resolve_names(["precipitation"])
-    assert get_variable("olr_precipitation").overlay == "precipitation_interval"
+    olr_map = get_variable("olr_precipitation")
+    assert (olr_map.draws, olr_map.overlay) == ("olr", "precipitation_interval")
+    assert not get_variable("olr").maps
 
 
 def test_olr_zeros_are_missing_and_mostly_zero_is_rejected(tmp_path):
@@ -325,7 +328,7 @@ def test_olr_zeros_are_missing_and_mostly_zero_is_rejected(tmp_path):
     adapter = WRFAdapter()
     (ds,) = adapter.discover(run)
     with pytest.raises(FieldQualityError, match="exactly 0"):
-        adapter.compute(ds, "olr_precipitation", 0)
-    f = adapter.compute(ds, "olr_precipitation", 1)
+        adapter.compute(ds, "olr", 0)
+    f = adapter.compute(ds, "olr", 1)
     assert np.isnan(f.data[:, -1]).all() and np.isfinite(f.data[:, :-1]).all()
     assert f.provenance["n_zero_set_missing"] == ds.grid.height

@@ -320,14 +320,16 @@ class CatalogBuilder:
         out = {}
         for v in variables:
             var = get_variable(v)
-            out[v] = pystac.ItemAssetDefinition.create(
-                title=f"{var.long_name} ({var.units})", description=var.description,
-                media_type=COG_MEDIA_TYPE, roles=["data"],
-            )
-            out[f"{v}_map"] = pystac.ItemAssetDefinition.create(
-                title=f"Map: {var.long_name}", description=None,
-                media_type=pystac.MediaType.PNG, roles=["visual", "overview"],
-            )
+            if var.draws is None:  # map-only products have no data asset
+                out[v] = pystac.ItemAssetDefinition.create(
+                    title=f"{var.long_name} ({var.units})", description=var.description,
+                    media_type=COG_MEDIA_TYPE, roles=["data"],
+                )
+            if var.maps:
+                out[f"{v}_map"] = pystac.ItemAssetDefinition.create(
+                    title=f"Map: {var.long_name}", description=var.description if var.draws else None,
+                    media_type=pystac.MediaType.PNG, roles=["visual", "overview"],
+                )
         return out
 
     def save(self) -> Path:
