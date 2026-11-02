@@ -26,6 +26,7 @@ import numpy as np
 from tqdm import tqdm
 
 import modelatlasify.variables  # noqa: F401 - registers the standard variables
+from modelatlasify.core import storage
 from modelatlasify.core.areas import FULL_AREA, SubArea
 from modelatlasify.core.catalog import AssetRecord, CatalogBuilder, ItemRecord
 from modelatlasify.core.errors import DiscoveryError, FieldQualityError, NoModelOutputError
@@ -40,7 +41,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class PipelineOptions:
     inputs: list[Path]
-    output: Path
+    output: Path  # a local directory, or an s3:// prefix (str or UPath)
     #: "auto" (every model whose output is found in an input directory), one
     #: model name, or a comma-separated list, e.g. "wrf,dwm".
     model: str = "auto"
@@ -300,9 +301,9 @@ def _area_in_run(area: SubArea, datasets: list[ModelDataset]) -> bool:
 
 
 def _read_tif(path: Path) -> np.ndarray:
-    import rasterio
+    from rasterio.io import MemoryFile
 
-    with rasterio.open(path) as src:
+    with MemoryFile(storage.read_bytes(path)) as mem, mem.open() as src:  # local or S3
         return src.read(1)
 
 

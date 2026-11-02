@@ -12,6 +12,7 @@ from pathlib import Path
 
 from modelatlasify import __version__
 import modelatlasify.variables  # noqa: F401 - registers the standard variables
+from modelatlasify.core import storage
 from modelatlasify.core.areas import parse_sub_areas
 from modelatlasify.core.errors import ModelAtlasifyError
 from modelatlasify.core.variables import all_variables, resolve_names
@@ -40,8 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("inputs", nargs="+", type=Path, metavar="INPUT_DIR",
                    help="directory containing model output (e.g. wrfout_d01_* files)")
-    p.add_argument("-o", "--output", type=Path, default=Path("atlas"),
-                   help="output directory for the catalog and assets (default: ./atlas)")
+    p.add_argument("-o", "--output", default="atlas",
+                   help="output directory for the catalog and assets (default: ./atlas), or "
+                        "s3://bucket/prefix to write straight to S3 (uses your AWS CLI login "
+                        "or the AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables)")
     p.add_argument("--model", default="auto", type=str.lower,
                    choices=("auto", *AVAILABLE_MODELS, "umwm"),
                    help="model output to look for; 'auto' (default) uses every model found in "
@@ -79,7 +82,8 @@ def write_command_record(run_dir: Path, argv: list[str], started: datetime) -> P
     """Save the command line (and where it was run) as
     ``<run_dir>/command-used.<YYYYMMDDTHHMMSSZ>.txt`` for reproducibility."""
     path = run_dir / f"command-used.{started:%Y%m%dT%H%M%SZ}.txt"
-    path.write_text(
+    storage.write_text(
+        path,
         "modelatlasify " + shlex.join(argv) + "\n\n"
         f"# started:   {started:%Y-%m-%d %H:%M:%S} UTC\n"
         f"# directory: {os.getcwd()}\n"
@@ -121,13 +125,20 @@ def main(argv: list[str] | None = None) -> int:
     from modelatlasify.core.processing import PipelineOptions, run_pipeline
     from modelatlasify.core.validation import validate_catalog
 
+    try:
+        output = storage.output_root(args.output)
+        storage.check_writable(output)  # S3: credentials and permission, before any work
+    except storage.OutputAccessError as exc:
+        _status(f"error: {exc}")
+        return 1
+
     options = PipelineOptions(
-        inputs=args.inputs, output=args.output, model=args.model, variables=variables,
+        inputs=args.inputs, output=output, model=args.model, variables=variables,
         plots=args.plots, domains=domains, processes=args.processes, sub_areas=sub_areas,
         full_plots=args.full_plots, cut_dirs=args.cut_dirs,
     )
     models = "all models found" if args.model == "auto" else args.model.upper()
-    _status(f"ModelAtlasify {__version__}: {models} -> {args.output.resolve()}")
+    _status(f"ModelAtlasify {__version__}: {models} -> {output}")
     _status(f"Variables: {', '.join(variables) if variables else 'all available'}"
             + (f" ({args.processes} processes)" if args.processes > 1 else ""))
     if sub_areas:

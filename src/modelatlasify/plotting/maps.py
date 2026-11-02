@@ -11,6 +11,7 @@ as its true quadrilateral (pcolormesh on the projected cell corners).
 
 from __future__ import annotations
 
+import io
 import logging
 import math
 import warnings
@@ -28,6 +29,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from pyproj import CRS, Transformer  # noqa: E402
 
+from modelatlasify.core import storage  # noqa: E402
 from modelatlasify.core.areas import FULL_AREA, SubArea  # noqa: E402
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
 from modelatlasify.core.variables import VariableDefinition  # noqa: E402
@@ -242,9 +244,10 @@ def _draw_map(
         fig.text(0.06, 0.905, subtitle, fontsize=9, va="top", color="0.25")
     fig.text(0.94, 0.95, "ModelAtlasify", fontsize=8, ha="right", va="top", color="0.5")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=dpi)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi)
     plt.close(fig)
+    storage.write_bytes(path, buf.getvalue())  # a local file, or straight to S3
     return path
 
 
