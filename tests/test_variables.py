@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from conftest import T0
-from wrf_fixture import hourly, write_wrfout
+from wrf_fixture import SPRAY_FIELDS, hourly, write_uwin_nml, write_wrfout
 from modelatlasify.core.errors import FieldQualityError, VariableUnavailableError
 from modelatlasify.core.variables import resolve_names
 from modelatlasify.models.wrf import WRFAdapter
@@ -211,5 +211,65 @@ def test_interval_helper_clips_roundoff_and_masks_real_decreases():
 def test_variable_aliases():
     assert resolve_names(["wind"]) == ["surface_wind_speed"]
     assert resolve_names(["precipitation"]) == ["precipitation", "precipitation_interval"]
+    assert resolve_names(["spray"]) == ["spray_mass_flux", "spray_latent_heat_flux",
+                                        "spray_sensible_heat_flux"]
+    assert resolve_names(["mspr", "hlspr", "hsspr"]) == resolve_names(["spray"])
     with pytest.raises(KeyError, match="Unknown variable"):
         resolve_names(["temperature"])
+
+
+SPRAY_INCLUDE = ("U10", "V10", "RAINC", "RAINNC", *SPRAY_FIELDS)
+
+
+@pytest.mark.parametrize("variable,scale", [("spray_mass_flux", 1e-5),
+                                            ("spray_latent_heat_flux", 2.0),
+                                            ("spray_sensible_heat_flux", 0.1)])
+def test_spray_fields_when_spray_is_on(tmp_path, variable, scale):
+    run = tmp_path / "r"
+    write_wrfout(run, hourly(T0, 3), include=SPRAY_INCLUDE)
+    write_uwin_nml(run, spray=True)
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(run)
+    assert adapter.unavailable_variables(ds) == {}
+    assert variable in adapter.dataset_variables(ds)
+    f = adapter.compute(ds, variable, 2)
+    nx = ds.grid.width
+    np.testing.assert_allclose(
+        f.data, np.broadcast_to(scale * 2.0 * (1 + np.arange(nx) / nx), f.data.shape), rtol=1e-5)
+
+
+@pytest.mark.parametrize("spray_nml", [False, None])  # .F., or no uwin.nml at all
+def test_spray_fields_unavailable_when_spray_is_off(tmp_path, spray_nml):
+    run = tmp_path / "r"
+    write_wrfout(run, hourly(T0, 2), include=SPRAY_INCLUDE)  # WRF writes them anyway (zeros)
+    if spray_nml is not None:
+        write_uwin_nml(run, spray=spray_nml)
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(run)
+    unavailable = adapter.unavailable_variables(ds)
+    assert set(unavailable) == {"spray_mass_flux", "spray_latent_heat_flux",
+                                "spray_sensible_heat_flux"}
+    assert all("sea spray was not on" in r for r in unavailable.values())
+    assert "surface_wind_speed" in adapter.dataset_variables(ds)
+    assert "spray_mass_flux" not in adapter.dataset_variables(ds)
+    with pytest.raises(VariableUnavailableError, match="sea spray was not on"):
+        adapter.compute(ds, "spray_mass_flux", 1)
+
+
+def test_spray_units_are_checked(tmp_path):
+    run = tmp_path / "r"
+    write_wrfout(run, hourly(T0, 2), include=SPRAY_INCLUDE, spray_units={"MSPR": "g m-2 s-1"})
+    write_uwin_nml(run, spray=True)
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(run)
+    with pytest.raises(VariableUnavailableError, match="expected 'kg m-2 s-1'"):
+        adapter.compute(ds, "spray_mass_flux", 1)
+
+
+def test_spray_mass_flux_uses_log_spaced_levels():
+    from modelatlasify.core.variables import get_variable
+
+    levels = get_variable("spray_mass_flux").levels
+    assert levels[0] == 1e-7 and levels[-1] == 1e-2
+    ratios = np.array(levels[1:]) / np.array(levels[:-1])
+    np.testing.assert_allclose(ratios, np.tile([2.0, 2.5, 2.0], 5))

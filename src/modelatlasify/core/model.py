@@ -183,6 +183,17 @@ class ModelAdapter(abc.ABC):
         required model fields are missing.
         """
 
+    def unavailable_variables(self, dataset: ModelDataset) -> dict[str, str]:
+        """Supported variables that this particular dataset cannot provide,
+        mapped to the reason (e.g. sea spray products of a run without spray).
+        """
+        return {}
+
+    def dataset_variables(self, dataset: ModelDataset) -> list[str]:
+        """The standard variables this adapter can produce for ``dataset``."""
+        unavailable = self.unavailable_variables(dataset)
+        return [v for v in self.supported_variables() if v not in unavailable]
+
     def prepare(self, dataset: ModelDataset, variables: list[str]) -> None:  # noqa: B027
         """Optional hook, run once per dataset in the main process before any
         :meth:`compute` call. Adapters use it for work that depends on earlier

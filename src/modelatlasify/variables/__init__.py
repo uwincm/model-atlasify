@@ -1,3 +1,7 @@
-"""Standard variable definitions. Importing this package registers them all."""
+"""Standard variable definitions. Importing this package registers them all.
 
-from modelatlasify.variables import precipitation, waves, wind  # noqa: F401
+The import order is the registration order, which sets the row order of
+model-images.html.
+"""
+
+from modelatlasify.variables import precipitation, spray, waves, wind  # noqa: F401

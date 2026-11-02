@@ -38,6 +38,9 @@ line.
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration
   - accumulated over each output interval
+- **Sea spray** (WRF in UWIN-CM runs with spray on): spray mass flux
+  (kg m-2 s-1, logarithmic colour scale), spray-mediated latent and sensible
+  heat flux (W m-2)
 - **Waves** (DWM): significant wave height (m), mean wave period (s), dominant
   wave period (s). Land is missing.
 - **GeoTIFF** output (COG, float32, NaN nodata, CRS + affine transform, units and
@@ -173,7 +176,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf` or `dwm` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
-| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed`), `precipitation` (= accumulated + interval), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
 | `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
@@ -206,6 +209,7 @@ src/modelatlasify/
 ├── variables/
 │   ├── wind.py               surface_wind_speed definition; wind_speed(), destagger()
 │   ├── precipitation.py      precipitation definitions; interval_precipitation()
+│   ├── spray.py              sea spray mass flux, spray latent/sensible heat flux
 │   └── waves.py              significant wave height, mean/dominant wave period
 ├── geospatial/
 │   ├── geotiff.py            COG writer
@@ -292,6 +296,23 @@ Everything after the adapter works only with model-agnostic types: a
     Larger negative differences are set to missing and counted.
   - The interval product is undefined at the first output time.
   - The asset carries `start_datetime`/`end_datetime`.
+
+### Sea spray
+
+- `spray_mass_flux` = `MSPR`, `spray_latent_heat_flux` = `HLSPR` and
+  `spray_sensible_heat_flux` = `HSSPR`, as written in `wrfout`. Their units
+  are checked (`kg m-2 s-1`, `W m-2`).
+- WRF writes these fields even when spray is off (as zeros), so having the
+  fields does not mean spray was on. Spray is taken to be on only when the run
+  directory's UWIN-CM coupler namelist `uwin.nml` sets
+  `sprayMediatedHeatFluxes = .T.`. Without `uwin.nml` (e.g. stand-alone WRF)
+  there is no spray.
+- The mass flux spans several orders of magnitude (about 1e-7 to 0.1 kg m-2
+  s-1), so its colour scale is logarithmic: 1-2-5 steps from 1e-7 to 1e-2,
+  with larger values on the "max" arrow. The heat fluxes use linear scales.
+- Spray is 0 where the wind is below the spray threshold, and at the
+  initialization time. Those areas are drawn transparent. An all-zero field
+  is not treated as corrupt.
 
 ### Data-quality checks
 
@@ -382,7 +403,8 @@ This is a prototype. It does **not** yet provide:
 - a database or cloud deployment (output is plain files; the self-contained
   catalog can be uploaded to object storage as is)
 - broad model support (WRF only; no coupled ocean/wave components yet)
-- complete WRF variable support (only 10 m wind speed and precipitation), or
+- complete WRF variable support (only 10 m wind speed, precipitation and sea
+  spray), or
   vertical levels
 - `MAP_PROJ=6` (lat-lon/rotated) grids or moving nests
 - reprojection to a common CRS (GeoTIFFs stay in the native projection)

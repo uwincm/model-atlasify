@@ -53,6 +53,22 @@ def grid_lonlat(p: dict, nx: int, ny: int, dx: float, dy: float, shift=(0, 0)):
     return lon, np.asarray(lat), x0, y0
 
 
+#: Sea spray fields written by write_wrfout: name -> (scale, units).
+SPRAY_PATTERNS = {"MSPR": (1e-5, "kg m-2 s-1"), "HLSPR": (2.0, "W m-2"), "HSSPR": (0.1, "W m-2")}
+SPRAY_FIELDS = tuple(SPRAY_PATTERNS)
+
+
+def write_uwin_nml(directory: Path, spray: bool) -> Path:
+    """A minimal UWIN-CM coupler namelist with the spray switch on or off."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "uwin.nml"
+    path.write_text(
+        "&MAIN\n  atmosphere = .T.\n  waves      = .T.\n/\n\n&COUPLER\n"
+        f"  sprayMediatedHeatFluxes   = {'.T.' if spray else '.F.'} ! at least AW = .T.\n/\n"
+    )
+    return path
+
+
 def write_wrfout(
     directory: Path,
     times: list[datetime],
@@ -72,6 +88,7 @@ def write_wrfout(
     corrupt_xtime: tuple[datetime, ...] = (),
     move: tuple[int, int] = (0, 0),
     prec_acc_dt: float | None = None,
+    spray_units: dict[str, str] | None = None,
 ) -> list[Path]:
     """Write wrfout_dNN_* files. Returns paths.
 
@@ -83,6 +100,10 @@ def write_wrfout(
 
     ``prec_acc_dt`` (minutes) also writes PREC_ACC_C/PREC_ACC_NC: the RAINC/
     RAINNC increase since the last multiple of PREC_ACC_DT after sim_start.
+
+    Sea spray fields (when in ``include``), with h = hours since sim_start:
+      MSPR = 1e-5 h (1 + i/nx), HLSPR = 2 h (1 + i/nx), HSSPR = 0.1 h (1 + i/nx).
+    ``spray_units`` overrides their units attribute (e.g. {"MSPR": "g m-2 s-1"}).
 
     ``move`` = (cols east, rows north) per output time makes a moving nest:
     the k-th time is shifted by k * move cells, and the i in the patterns
@@ -138,6 +159,8 @@ def write_wrfout(
                 fields[name] = nc.createVariable(name, "f4", dims)
                 fields[name].units = rain_units if name.startswith(("RAIN", "I_RAIN", "PREC_ACC")) else (
                     "" if name.startswith("I_") else "m s-1")
+                if name in SPRAY_PATTERNS:
+                    fields[name].units = (spray_units or {}).get(name, SPRAY_PATTERNS[name][1])
             for n, t in enumerate(chunk):
                 kk = k + n
                 lon, lat, _, _ = grid_lonlat(p, nx, ny, dx, dx, (kk * move[0], kk * move[1]))
@@ -177,6 +200,9 @@ def write_wrfout(
                     rainc = np.mod(rainc, bucket_mm)
                 if "RAINNC" in fields:
                     fields["RAINNC"][n] = rainnc
+                for name, (scale, _) in SPRAY_PATTERNS.items():
+                    if name in fields:
+                        fields[name][n] = scale * hours * (1.0 + ii / nx)
                 if "RAINC" in fields:
                     fields["RAINC"][n] = rainc
         paths.append(path)

@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Example: modelatlasify /data/wrf/run01 --output ./atlas\n"
             f"Variables: {var_help}. Aliases: wind, precipitation (= accumulated + interval), "
-            "waves (= swh + mwp + dwp)."
+            "waves (= swh + mwp + dwp), spray (= mspr + hlspr + hsspr; WRF runs with sea spray on)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
