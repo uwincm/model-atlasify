@@ -84,6 +84,12 @@ def _norm_and_cmap(variable: VariableDefinition, data: np.ndarray):
     return mcolors.Normalize(vmin=vmin, vmax=vmax), cmap
 
 
+#: Layers of one field, coarsest first: (data or None = outline only, grid).
+Layers = list[tuple[np.ndarray | None, GridDefinition]]
+#: A second field drawn over the first (e.g. precipitation over OLR).
+Overlay = tuple[VariableDefinition, Layers]
+
+
 @dataclass(frozen=True)
 class MapView:
     """What a map shows. ``crs`` is the native CRS for a grid's own-projection
@@ -146,39 +152,46 @@ def subarea_view(area: SubArea) -> MapView:
 def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
     title: str, subtitle: str = "", dpi: int = 110,
+    overlay: tuple[VariableDefinition, FieldResult | None] | None = None,
 ) -> Path:
+    """Map of one field over its grid's whole area. ``overlay`` is another
+    field on the same grid drawn on top (None field = nothing to overlay)."""
+    over = None
+    if overlay is not None and overlay[1] is not None:
+        over = (overlay[0], [(overlay[1].data, grid)])
     # In a lon/lat box the grid's edge is inside the map: outline it.
     return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
-                     outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi)
+                     outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi, overlay=over)
 
 
 def plot_composite(
     path: Path, base: tuple[np.ndarray, GridDefinition],
     nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
     title: str, subtitle: str = "", area: SubArea | None = None, domain_edge: bool = False,
-    dpi: int = 110,
+    dpi: int = 110, overlay: Overlay | None = None,
 ) -> Path:
     """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
     grids drawn on top (finest last) and their boundaries outlined in black. A
     nest with ``data=None`` is drawn as an outline only. ``domain_edge`` also
     outlines the base grid itself: dashed, or solid like the nests when the
-    base grid is drawn in a lon/lat box (``uses_lonlat_view``)."""
+    base grid is drawn in a lon/lat box (``uses_lonlat_view``). ``overlay`` is
+    a second field (base grid first, then the nests) drawn on top."""
     base_grid = base[1]
     view = full_view(base_grid) if area is None else subarea_view(area)
     solid_edge = base_grid.uses_lonlat_view
     return _draw_map(path, view, [base, *nests], variable, title, subtitle,
                      outlines=[g for _, g in nests] + ([base_grid] if solid_edge else []),
                      dashed_outlines=[base_grid] if domain_edge and not solid_edge else [],
-                     dpi=dpi)
+                     dpi=dpi, overlay=overlay)
 
 
 def _draw_map(
-    path: Path, view: MapView, layers: list[tuple[np.ndarray | None, GridDefinition]],
+    path: Path, view: MapView, layers: Layers,
     variable: VariableDefinition, title: str, subtitle: str = "",
     outlines: list[GridDefinition] = (), dashed_outlines: list[GridDefinition] = (),
-    dpi: int = 110,
+    dpi: int = 110, overlay: Overlay | None = None,
 ) -> Path:
-    """Draw ``layers`` (coarsest first) in ``view``."""
+    """Draw ``layers`` (coarsest first) in ``view``, and ``overlay`` on top."""
     proj = view.projection
     x0, x1, y0, y1 = view.extent
     aspect = (x1 - x0) / (y1 - y0)
@@ -189,17 +202,61 @@ def _draw_map(
     ax.set_extent(view.extent, crs=proj)
     ax.set_facecolor("#e9eef2")
 
+    img = _draw_layers(ax, view, layers, variable, zorder0=1.0)
+    over_img = None
+    if overlay is not None:
+        over_img = _draw_layers(ax, view, overlay[1], overlay[0], zorder0=1.5)
+    _add_geography(ax, extent_m=view.extent_m)
+    for grids, style in ((outlines, "-"), (dashed_outlines, (0, (6, 4)))):
+        for grid in grids:
+            bx, by = _outline_in_view(view, grid)
+            ax.plot(bx, by, color="black", linewidth=1.2, linestyle=style, transform=proj,
+                    zorder=3)
+    try:
+        gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.xlabel_style = gl.ylabel_style = {"size": 8}
+    except Exception:  # noqa: BLE001 - labels unsupported for some projections
+        ax.gridlines(linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
+
+    if over_img is None:
+        _colorbar(fig, [0.2, 0.08, 0.6, 0.03], img, variable)
+    else:  # two colour bars side by side
+        _colorbar(fig, [0.06, 0.08, 0.4, 0.03], img, variable)
+        _colorbar(fig, [0.54, 0.08, 0.4, 0.03], over_img, overlay[0])
+
+    fig.text(0.06, 0.95, title, fontsize=12, fontweight="bold", va="top")
+    if subtitle:
+        fig.text(0.06, 0.905, subtitle, fontsize=9, va="top", color="0.25")
+    fig.text(0.94, 0.95, "ModelAtlasify", fontsize=8, ha="right", va="top", color="0.5")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi)
+    plt.close(fig)
+    storage.write_bytes(path, buf.getvalue())  # a local file, or straight to S3
+    return path
+
+
+def _draw_layers(ax, view: MapView, layers: Layers, variable: VariableDefinition,
+                 zorder0: float):
+    """Draw one field's layers (coarsest first; each is hidden where a finer
+    layer is drawn on top) and return a mappable for its colour bar."""
+    proj = view.projection
     drawn = [(np.asarray(d, dtype=np.float64), g) for d, g in layers if d is not None]
-    norm, cmap = _norm_and_cmap(variable, np.concatenate([d.ravel() for d, _ in drawn]))
+    values = np.concatenate([d.ravel() for d, _ in drawn]) if drawn else np.array([np.nan])
+    norm, cmap = _norm_and_cmap(variable, values)
     img = None
     for k, (data, grid) in enumerate(drawn):
         masked = np.ma.masked_invalid(data)
         if variable.transparent_below is not None:
             masked = np.ma.masked_less(masked, variable.transparent_below)
+        if variable.transparent_above is not None:
+            masked = np.ma.masked_greater(masked, variable.transparent_above)
         # Hide this layer wherever a finer layer is drawn on top of it.
         for _, finer in drawn[k + 1:]:
             masked = np.ma.masked_where(_inside(grid, finer), masked)
-        style = dict(cmap=cmap, norm=norm, zorder=1 + 0.1 * k)
+        style = dict(cmap=cmap, norm=norm, zorder=zorder0 + 0.01 * k)
         extent = _extent_in(grid, view.crs) if view.crs is not None else None
         if extent is not None:
             artist = ax.imshow(masked, origin="upper", extent=extent, transform=proj,
@@ -216,39 +273,18 @@ def _draw_map(
         img = img if img is not None else artist
     if img is None:  # nothing in view; keep the colour bar
         img = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-    _add_geography(ax, extent_m=view.extent_m)
-    for grids, style in ((outlines, "-"), (dashed_outlines, (0, (6, 4)))):
-        for grid in grids:
-            bx, by = _outline_in_view(view, grid)
-            ax.plot(bx, by, color="black", linewidth=1.2, linestyle=style, transform=proj,
-                    zorder=3)
-    try:
-        gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
-        gl.top_labels = False
-        gl.right_labels = False
-        gl.xlabel_style = gl.ylabel_style = {"size": 8}
-    except Exception:  # noqa: BLE001 - labels unsupported for some projections
-        ax.gridlines(linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
+    return img
 
-    cax = fig.add_axes([0.2, 0.08, 0.6, 0.03])
-    cb = fig.colorbar(img, cax=cax, orientation="horizontal", extend=variable.extend,
+
+def _colorbar(fig, rect: list[float], mappable, variable: VariableDefinition) -> None:
+    cax = fig.add_axes(rect)
+    cb = fig.colorbar(mappable, cax=cax, orientation="horizontal", extend=variable.extend,
                       spacing="uniform")
     cb.set_label(f"{variable.long_name} ({variable.units})", fontsize=9)
     cb.ax.tick_params(labelsize=8)
     if variable.levels:
         cb.set_ticks(variable.levels)
         cb.set_ticklabels([f"{v:g}" for v in variable.levels])
-
-    fig.text(0.06, 0.95, title, fontsize=12, fontweight="bold", va="top")
-    if subtitle:
-        fig.text(0.06, 0.905, subtitle, fontsize=9, va="top", color="0.25")
-    fig.text(0.94, 0.95, "ModelAtlasify", fontsize=8, ha="right", va="top", color="0.5")
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi)
-    plt.close(fig)
-    storage.write_bytes(path, buf.getvalue())  # a local file, or straight to S3
-    return path
 
 
 # ------------------------------------------------- placing grids on another

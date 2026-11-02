@@ -218,7 +218,7 @@ def test_variable_aliases():
         resolve_names(["temperature"])
 
 
-SPRAY_INCLUDE = ("U10", "V10", "RAINC", "RAINNC", *SPRAY_FIELDS)
+SPRAY_INCLUDE = ("U10", "V10", "RAINC", "RAINNC", "OLR", *SPRAY_FIELDS)
 
 
 @pytest.mark.parametrize("variable,scale", [("spray_mass_flux", 1e-5),
@@ -273,3 +273,62 @@ def test_spray_mass_flux_uses_log_spaced_levels():
     assert levels[0] == 1e-7 and levels[-1] == 1e-2
     ratios = np.array(levels[1:]) / np.array(levels[:-1])
     np.testing.assert_allclose(ratios, np.tile([2.0, 2.5, 2.0], 5))
+
+
+# ------------------------------------------------------------------- OLR
+def test_olr(tmp_path):
+    run = tmp_path / "r"
+    write_wrfout(run, hourly(T0, 2), include=("RAINC", "RAINNC", "OLR"))
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(run)
+    assert {"olr", "olr_precipitation"} <= set(adapter.dataset_variables(ds))
+    f = adapter.compute(ds, "olr", 1)
+    nx = ds.grid.width
+    np.testing.assert_allclose(
+        f.data, np.broadcast_to(100.0 + 150.0 * np.arange(nx) / nx, f.data.shape), rtol=1e-6)
+    assert f.provenance["source_variables"] == ["OLR"]
+
+
+def test_olr_unavailable_without_olr(wrf_run):
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(wrf_run)
+    unavailable = adapter.unavailable_variables(ds)
+    assert "no OLR" in unavailable["olr"] and "no OLR" in unavailable["olr_precipitation"]
+    assert not {"olr", "olr_precipitation"} & set(adapter.dataset_variables(ds))
+
+
+def test_olr_units_are_checked(tmp_path):
+    run = tmp_path / "r"
+    write_wrfout(run, hourly(T0, 2), include=("OLR",), olr_units="erg cm-2 s-1")
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(run)
+    with pytest.raises(VariableUnavailableError, match="expected 'W m-2'"):
+        adapter.compute(ds, "olr", 0)
+
+
+def test_olr_alias_and_overlay():
+    from modelatlasify.core.variables import get_variable
+
+    assert resolve_names(["olr"]) == ["olr", "olr_precipitation"]
+    assert "olr_precipitation" not in resolve_names(["precipitation"])
+    olr_map = get_variable("olr_precipitation")
+    assert (olr_map.draws, olr_map.overlay) == ("olr", "precipitation_interval")
+    assert not get_variable("olr").maps
+
+
+def test_olr_zeros_are_missing_and_mostly_zero_is_rejected(tmp_path):
+    import netCDF4
+
+    run = tmp_path / "r"
+    paths = write_wrfout(run, hourly(T0, 2), include=("OLR",))
+    with netCDF4.Dataset(paths[0], "a") as nc:  # initialization: radiation not run yet
+        nc["OLR"][0] = 0.0
+    with netCDF4.Dataset(paths[1], "a") as nc:  # a moving nest's new edge columns
+        nc["OLR"][0, :, -1] = 0.0
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(run)
+    with pytest.raises(FieldQualityError, match="exactly 0"):
+        adapter.compute(ds, "olr", 0)
+    f = adapter.compute(ds, "olr", 1)
+    assert np.isnan(f.data[:, -1]).all() and np.isfinite(f.data[:, :-1]).all()
+    assert f.provenance["n_zero_set_missing"] == ds.grid.height

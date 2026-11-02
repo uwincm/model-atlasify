@@ -89,6 +89,7 @@ def write_wrfout(
     move: tuple[int, int] = (0, 0),
     prec_acc_dt: float | None = None,
     spray_units: dict[str, str] | None = None,
+    olr_units: str = "W m-2",
 ) -> list[Path]:
     """Write wrfout_dNN_* files. Returns paths.
 
@@ -104,6 +105,8 @@ def write_wrfout(
     Sea spray fields (when in ``include``), with h = hours since sim_start:
       MSPR = 1e-5 h (1 + i/nx), HLSPR = 2 h (1 + i/nx), HSSPR = 0.1 h (1 + i/nx).
     ``spray_units`` overrides their units attribute (e.g. {"MSPR": "g m-2 s-1"}).
+
+    OLR (when in ``include``) = 100 + 150 i/nx W m-2; ``olr_units`` overrides its units.
 
     ``move`` = (cols east, rows north) per output time makes a moving nest:
     the k-th time is shifted by k * move cells, and the i in the patterns
@@ -161,6 +164,8 @@ def write_wrfout(
                     "" if name.startswith("I_") else "m s-1")
                 if name in SPRAY_PATTERNS:
                     fields[name].units = (spray_units or {}).get(name, SPRAY_PATTERNS[name][1])
+                if name == "OLR":
+                    fields[name].units = olr_units
             for n, t in enumerate(chunk):
                 kk = k + n
                 lon, lat, _, _ = grid_lonlat(p, nx, ny, dx, dx, (kk * move[0], kk * move[1]))
@@ -205,6 +210,8 @@ def write_wrfout(
                         fields[name][n] = scale * hours * (1.0 + ii / nx)
                 if "RAINC" in fields:
                     fields["RAINC"][n] = rainc
+                if "OLR" in fields:
+                    fields["OLR"][n] = 100.0 + 150.0 * ii / nx
         paths.append(path)
     return paths
 

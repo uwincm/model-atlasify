@@ -198,8 +198,18 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
     item_dir = _worker["builder"].item_dir(ds, valid)
     res = _TimeResult(run_id, dataset_id, ti)
     supported = adapter.dataset_variables(ds)
+    computed: dict[str, FieldResult] = {}  # fields that passed the checks, for maps
     for vname in (v for v in _worker["variables"] if v in supported):
         var = get_variable(vname)
+        if var.draws is not None:  # a map-only product of fields computed before it
+            if plot_field is not None and var.draws in computed:
+                fld = dataclasses.replace(computed[var.draws], variable=vname)
+                png = item_dir / f"{vname}.png"
+                _plot_item(png, ds, ti, fld, var, computed)
+                res.assets.append(AssetRecord(f"{vname}_map", png, vname, "visual",
+                                              dataclasses.replace(fld, data=None)))
+                res.n_png += 1
+            continue
         try:
             fld = adapter.compute(ds, vname, ti)
             if fld is None:
@@ -213,21 +223,34 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
             res.skipped.append({"variable": vname, "reason": reason})
             res.quality_skips.append(f"{ds.dataset_id} {valid:%Y-%m-%d %H:%M} {vname}: {reason}")
             continue
+        computed[vname] = fld
         tif = item_dir / f"{vname}.tif"
         info = write_geotiff(tif, fld, ds.grid_at(ti), var, extra_tags={
             "model": ds.model, "run_id": ds.run_id, "dataset": ds.dataset_id,
         })
-        if plot_field is not None:
+        mapped = plot_field is not None and var.maps
+        if mapped:
             png = item_dir / f"{vname}.png"
-            title, subtitle = _titles(ds, fld, var.long_name, var.units)
-            plot_field(png, fld, ds.grid_at(ti), var, title, subtitle)
+            _plot_item(png, ds, ti, fld, var, computed)
         meta = dataclasses.replace(fld, data=None)  # the catalog needs no pixels
         res.assets.append(AssetRecord(vname, tif, vname, "data", meta, info))
         res.n_tif += 1
-        if plot_field is not None:
+        if mapped:
             res.assets.append(AssetRecord(f"{vname}_map", png, vname, "visual", meta))
             res.n_png += 1
     return res
+
+
+def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
+               var: VariableDefinition, computed: dict[str, FieldResult]) -> None:
+    """Per-item map of ``fld`` (for a map-only product, the field it draws,
+    renamed to the product), with the product's overlay taken from ``computed``
+    (the fields that passed their checks at this time)."""
+    style = get_variable(var.draws) if var.draws else var
+    over = computed.get(var.overlay) if var.overlay else None
+    title, subtitle = _titles(ds, fld, style.long_name, style.units, over)
+    _worker["plot_field"](png, fld, ds.grid_at(ti), style, title, subtitle,
+                          overlay=(get_variable(var.overlay), over) if var.overlay else None)
 
 
 # ------------------------------------------------------ composite maps
@@ -251,6 +274,10 @@ class _CompositeTask:
     # (dataset_id, time index or None for a fixed nest without output then,
     #  GeoTIFF or None = outline only)
     nests: list[tuple[str, int | None, Path | None]]
+    # The variable's overlay (VariableDefinition.overlay), if any: the base's
+    # (GeoTIFF, metadata) or None, and one GeoTIFF or None per entry of nests.
+    overlay_base: tuple[Path, FieldResult] | None = None
+    overlay_nests: list[Path | None] = field(default_factory=list)
 
 
 def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
@@ -271,23 +298,39 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
     plot_area = FULL_AREA if area is None else area.name
     tasks = []
     nest_times = {n.dataset_id: {t: i for i, t in enumerate(n.valid_times)} for n in nests}
+
+    def same_period(p, meta) -> Path | None:
+        if p is not None and (p[1].start_time, p[1].end_time) == (meta.start_time, meta.end_time):
+            return p[0]
+        return None
+
     for bi, valid in enumerate(base.valid_times):
         for vname in variables:
-            if (base.dataset_id, valid, vname) not in products:
+            var = get_variable(vname)
+            if not var.maps:
+                continue
+            source = var.draws or vname  # a map-only product draws another's GeoTIFF
+            if (base.dataset_id, valid, source) not in products:
                 continue  # not defined or failed sanity checks
-            tif, meta = products[(base.dataset_id, valid, vname)]
-            overlays = []
+            tif, meta = products[(base.dataset_id, valid, source)]
+            if var.draws:  # titles name the product, not the field it draws
+                meta = dataclasses.replace(meta, variable=vname)
+            over_name = var.overlay
+            over_base = products.get((base.dataset_id, valid, over_name)) if over_name else None
+            layers, over_layers = [], []
             for nest in nests:
                 ni = nest_times[nest.dataset_id].get(valid)
                 if ni is None and nest.moving:
                     continue
-                p = products.get((nest.dataset_id, valid, vname))
-                same_period = p is not None and (p[1].start_time, p[1].end_time) == (
-                    meta.start_time, meta.end_time)
-                overlays.append((nest.dataset_id, ni, p[0] if same_period else None))
+                layers.append((nest.dataset_id, ni,
+                               same_period(products.get((nest.dataset_id, valid, source)), meta)))
+                if over_base is not None:
+                    over_layers.append(same_period(
+                        products.get((nest.dataset_id, valid, over_name)), over_base[1]))
             tasks.append(_CompositeTask(
                 base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
-                area, edge, (base.dataset_id, bi, tif, meta), overlays))
+                area, edge, (base.dataset_id, bi, tif, meta), layers,
+                over_base, over_layers))
     return tasks
 
 
@@ -312,12 +355,21 @@ def _plot_composite(task: _CompositeTask) -> Path:
     base_id, bi, base_tif, meta = task.base
     base_ds: ModelDataset = datasets[(task.run_id, base_id)]
     var = get_variable(task.variable)
+    style = get_variable(var.draws) if var.draws else var  # how the field is drawn
     nests = []
     for nid, ni, tif in task.nests:
         nest: ModelDataset = datasets[(task.run_id, nid)]
         grid = nest.grid if ni is None else nest.grid_at(ni)
         nests.append((None if tif is None else _read_tif(tif), grid))
-    title, subtitle = _titles(base_ds, meta, var.long_name, var.units)
+    overlay = None
+    if task.overlay_base is not None:
+        over_tif, over_meta = task.overlay_base
+        over_layers = [(_read_tif(over_tif), base_ds.grid_at(bi))] + [
+            (None if t is None else _read_tif(t), grid)
+            for t, (_, grid) in zip(task.overlay_nests, nests)]
+        overlay = (get_variable(var.overlay), over_layers)
+    title, subtitle = _titles(base_ds, meta, style.long_name, style.units,
+                              None if task.overlay_base is None else over_meta)
     overlaid = [(nid, grid) for (nid, _, tif), (_, grid) in zip(task.nests, nests)
                 if tif is not None]
     if task.area is not None:  # name only the nests that are in the area
@@ -329,8 +381,8 @@ def _plot_composite(task: _CompositeTask) -> Path:
     if task.area is not None:
         subtitle += f"  |  area '{task.area.name}'"
     return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid_at(bi)),
-                                     nests, var, title, subtitle, area=task.area,
-                                     domain_edge=task.edge)
+                                     nests, style, title, subtitle, area=task.area,
+                                     domain_edge=task.edge, overlay=overlay)
 
 
 def _log_levels() -> dict[str, int]:
@@ -352,7 +404,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
     try:
         runs = discover(adapter_list, options.inputs, options.domains, report, options.cut_dirs)
         used = [adapters[m] for m in dict.fromkeys(d.model for ds in runs.values() for d in ds)]
-        variables = _variables_for(options.variables, used)
+        variables = _with_dependencies(_variables_for(options.variables, used), report)
         if options.variables is not None:
             for datasets in runs.values():
                 _warn_unavailable(datasets, variables, adapters, report)
@@ -488,6 +540,23 @@ def _variables_for(requested: list[str] | None, adapters: list[ModelAdapter]) ->
     return list(requested)
 
 
+def _with_dependencies(variables: list[str], report: Callable[[str], None]) -> list[str]:
+    """``variables`` plus the variables their maps need (olr_precipitation
+    draws olr and overlays precipitation_interval), each placed just before
+    the first variable that uses it so it is computed first at every time."""
+    out: list[str] = []
+    for v in variables:
+        var = get_variable(v)
+        for dep in (var.draws, var.overlay):
+            if dep and dep not in out:
+                if dep not in variables:
+                    report(f"Also making {dep}: the {v} maps use it.")
+                out.append(dep)
+        if v not in out:
+            out.append(v)
+    return out
+
+
 def _warn_unavailable(datasets: list[ModelDataset], variables: list[str],
                       adapters: dict[str, ModelAdapter], report: Callable[[str], None]) -> None:
     """Warn, once per run and reason, about requested variables that a model
@@ -531,17 +600,26 @@ def check_field(fld: FieldResult, var: VariableDefinition) -> None:
             )
 
 
-def _titles(ds: ModelDataset, fld: FieldResult, long_name: str, units: str) -> tuple[str, str]:
+def _interval_precip_title(fld: FieldResult, units: str) -> str:
+    hours = (fld.end_time - fld.start_time).total_seconds() / 3600.0
+    if fld.provenance.get("hourly_equivalent_scale", 1.0) != 1.0:
+        # e.g. a 15-min PREC_ACC accumulation scaled up to mm per hour.
+        return (f"1-h equivalent precipitation ({units}) from {60 * hours:g}-min total, "
+                f"{fld.start_time:%Y-%m-%d %H:%M} to {fld.end_time:%H:%M} UTC")
+    return (f"{hours:g}-h precipitation ({units}), "
+            f"{fld.start_time:%Y-%m-%d %H:%M} to {fld.end_time:%H:%M} UTC")
+
+
+def _titles(ds: ModelDataset, fld: FieldResult, long_name: str, units: str,
+            overlay: FieldResult | None = None) -> tuple[str, str]:
+    """Title and subtitle of a map. ``overlay`` is the field drawn on top, if any."""
     valid = fld.valid_time
     if fld.variable == "precipitation_interval" and fld.start_time:
-        hours = (fld.end_time - fld.start_time).total_seconds() / 3600.0
-        if fld.provenance.get("hourly_equivalent_scale", 1.0) != 1.0:
-            # e.g. a 15-min PREC_ACC accumulation scaled up to mm per hour.
-            title = (f"1-h equivalent precipitation ({units}) from {60 * hours:g}-min total, "
-                     f"{fld.start_time:%Y-%m-%d %H:%M} to {fld.end_time:%H:%M} UTC")
-        else:
-            title = (f"{hours:g}-h precipitation ({units}), "
-                     f"{fld.start_time:%Y-%m-%d %H:%M} to {fld.end_time:%H:%M} UTC")
+        title = _interval_precip_title(fld, units)
+    elif (fld.variable == "olr_precipitation" and overlay is not None
+          and overlay.variable == "precipitation_interval" and overlay.start_time):
+        over_units = get_variable(overlay.variable).units
+        title = f"OLR ({units}) and " + _interval_precip_title(overlay, over_units)
     elif fld.variable == "precipitation" and ds.reference_time:
         title = f"{long_name} since {ds.reference_time:%Y-%m-%d %H:%M} UTC ({units})"
     else:

@@ -163,3 +163,37 @@ def test_no_full_plots_keeps_sub_areas_and_item_maps(tmp_path):
     assert not (images / "full").exists()
     assert len(list(images.glob("zoom/surface_wind_speed/*.png"))) == 2
     assert len(list(run_out(out, run).glob("items/*/surface_wind_speed.png"))) == 2
+
+
+def test_olr_precipitation_maps(tmp_path, capsys):
+    import json
+
+    import rasterio
+
+    include = ("U10", "V10", "RAINC", "RAINNC", "OLR")
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 3), include=include)
+    write_wrfout(run, hourly(T0, 3), domain=2, nx=20, ny=16, dx=4000.0, include=include)
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--variables", "olr", "--no-validate"]) == 0
+    assert "Also making precipitation_interval" in capsys.readouterr().err
+
+    item = sorted(run_out(out, run).glob("items/d01-*"))[-1]
+    assert {p.name for p in item.iterdir() if p.suffix in (".tif", ".png")} == {
+        "olr.tif", "olr_precipitation.png",
+        "precipitation_interval.tif", "precipitation_interval.png"}
+    with rasterio.open(item / "olr.tif") as src:  # the full range: no 240 W m-2 cutoff
+        assert src.read(1).max() > 240.0
+    assets = json.loads((item / f"{item.name}.json").read_text())["assets"]
+    assert assets["olr"]["roles"] == ["data"]
+    assert "visual" in assets["olr_precipitation_map"]["roles"]
+    assert "olr_map" not in assets and "olr_precipitation" not in assets
+
+    images = run_out(out, run) / "model-images" / "full"
+    olr = sorted(p.name for p in (images / "olr_precipitation").glob("*.png"))
+    assert len(olr) == 3  # also at the first time, without precipitation on top
+    assert (images / "olr_precipitation.html").is_file()
+    assert not (images / "olr").exists()
+    summary = (run_out(out, run) / "model-images.html").read_text(encoding="utf-8")
+    assert "OLR with interval precipitation" in summary
+    assert validate_catalog(out / "catalog.json", schemas=False).ok

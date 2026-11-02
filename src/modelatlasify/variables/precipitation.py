@@ -86,6 +86,57 @@ PRECIPITATION_INTERVAL = register(
     )
 )
 
+#: OLR colour scale: reversed greyscale spread over OLR_FULL_RANGE (white =
+#: cold cloud tops), of which only up to OLR_CLEAR is drawn; above it is drawn
+#: transparent so the map background shows through clear sky.
+OLR_FULL_RANGE = (80.0, 300.0)
+OLR_CLEAR = 240.0
+
+
+def get_colormap_olr():
+    """``gray_r`` over OLR_FULL_RANGE, cut at OLR_CLEAR (for vmin..OLR_CLEAR)."""
+    lo, hi = OLR_FULL_RANGE
+    top = (OLR_CLEAR - lo) / (hi - lo)
+    return colors.LinearSegmentedColormap.from_list(
+        "olr_gray_r", plt.cm.gray_r(np.linspace(0.0, top, 256)), N=256)
+
+
+#: GeoTIFF only (full range, no cutoff); mapped by OLR_PRECIPITATION, in this style.
+OLR = register(
+    VariableDefinition(
+        name="olr",
+        long_name="Outgoing longwave radiation",
+        units="W m-2",
+        standard_name="toa_outgoing_longwave_flux",
+        description=(
+            "Outgoing longwave radiation at the top of the atmosphere, instantaneous at "
+            "the valid time. Missing where the model had not computed it (e.g. edge "
+            "cells a moving nest has just moved into)."
+        ),
+        cmap=get_colormap_olr(),
+        vmin=OLR_FULL_RANGE[0],
+        vmax=OLR_CLEAR,
+        extend="min",
+        transparent_above=OLR_CLEAR,  # on maps only
+        maps=False,
+    )
+)
+
+OLR_PRECIPITATION = register(
+    VariableDefinition(
+        name="olr_precipitation",
+        long_name="OLR with interval precipitation",
+        units="W m-2; mm",
+        description=(
+            "Map of outgoing longwave radiation (olr) with precipitation_interval drawn "
+            "on top. A map only: the data are the olr and precipitation_interval GeoTIFFs."
+        ),
+        draws="olr",
+        overlay="precipitation_interval",
+        aliases=("olr", "olr_precip"),
+    )
+)
+
 #: Differences more negative than this (mm) are treated as a broken accumulation
 #: (e.g. a reset) rather than float round-off.
 NEGATIVE_TOLERANCE_MM = 0.01
