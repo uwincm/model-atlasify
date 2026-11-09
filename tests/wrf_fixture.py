@@ -107,6 +107,7 @@ def write_wrfout(
     ``spray_units`` overrides their units attribute (e.g. {"MSPR": "g m-2 s-1"}).
 
     OLR (when in ``include``) = 100 + 150 i/nx W m-2; ``olr_units`` overrides its units.
+    T2 (when in ``include``) = 263.15 + 50 i/nx K (-10 to 40 C).
 
     ``move`` = (cols east, rows north) per output time makes a moving nest:
     the k-th time is shifted by k * move cells, and the i in the patterns
@@ -166,6 +167,8 @@ def write_wrfout(
                     fields[name].units = (spray_units or {}).get(name, SPRAY_PATTERNS[name][1])
                 if name == "OLR":
                     fields[name].units = olr_units
+                if name == "T2":
+                    fields[name].units = "K"
             for n, t in enumerate(chunk):
                 kk = k + n
                 lon, lat, _, _ = grid_lonlat(p, nx, ny, dx, dx, (kk * move[0], kk * move[1]))
@@ -212,6 +215,8 @@ def write_wrfout(
                     fields["RAINC"][n] = rainc
                 if "OLR" in fields:
                     fields["OLR"][n] = 100.0 + 150.0 * ii / nx
+                if "T2" in fields:
+                    fields["T2"][n] = 263.15 + 50.0 * ii / nx
         paths.append(path)
     return paths
 
