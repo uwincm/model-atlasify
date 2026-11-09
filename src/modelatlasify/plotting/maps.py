@@ -162,18 +162,19 @@ def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
     title: str, subtitle: str = "", dpi: int = 110,
     overlay: tuple[VariableDefinition, FieldResult | None] | None = None,
-    vectors: tuple[np.ndarray, np.ndarray] | None = None,
+    vectors: VectorLayers | None = None,
 ) -> Path:
     """Map of one field over its grid's whole area. ``overlay`` is another
     field on the same grid drawn on top (None field = nothing to overlay);
-    ``vectors`` = (eastward, northward) wind on the grid, drawn as arrows."""
+    ``vectors`` = (eastward, northward) wind layers (on this grid or others,
+    coarsest first), drawn as arrows."""
     over = None
     if overlay is not None and overlay[1] is not None:
         over = (overlay[0], [(overlay[1].data, grid)])
     # In a lon/lat box the grid's edge is inside the map: outline it.
     return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
                      outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi, overlay=over,
-                     vectors=None if vectors is None else [(*vectors, grid)])
+                     vectors=vectors)
 
 
 def plot_composite(

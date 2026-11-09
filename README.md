@@ -51,7 +51,9 @@ line.
   (kg m-2 s-1, logarithmic colour scale), spray-mediated latent and sensible
   heat flux (W m-2)
 - **Waves** (DWM): significant wave height (m), mean wave period (s), dominant
-  wave period (s). Land is missing.
+  wave period (s). Land is missing. Wave height maps use "turbo" with the
+  lowest band (0–0.5 m) white, so calm seas and the wind vectors over them
+  stand out.
 - **GeoTIFF** output (COG, float32, NaN nodata, CRS + affine transform, units and
   provenance tags)
 - **PNG maps** in the native projection
@@ -360,9 +362,16 @@ in a box around the domain's outer edge plus 1° on every side.
   own map projection (so it holds for every position of a moving nest), and
   agrees with WRF's `COSALPHA`/`SINALPHA` to ~1e-5. They need `U10`/`V10`;
   there is no lowest-model-level fallback as for the speed.
-- Surface wind speed maps draw wind vectors: the composites in
+- Maps of every surface field draw 10 m wind vectors: surface wind speed,
+  2 m temperature, accumulated and interval precipitation, the sea spray
+  fluxes, and the DWM wave fields. This covers the composites in
   `model-images/` (whole domain and sub-areas) and every domain's per-item
-  maps.
+  maps. OLR (`olr_precipitation`) is a top-of-atmosphere field and has none.
+  - DWM makes no wind, so wave maps use the run's WRF `u10`/`v10` at the
+    same valid time (each arrow from the finest WRF domain there). They
+    have no vectors if the run has no WRF output, if WRF is left out with
+    `--model dwm`, or at DWM times WRF did not write. Arrows cover wherever
+    WRF has wind, including land and the margin around the wave domain.
   - Arrows sit on a square lattice, one every 250 km on the ground. If that
     gives fewer than 20 arrows across the map (small nests and sub-areas),
     the spacing shrinks so there are exactly 20 across, with the same spacing
@@ -374,8 +383,9 @@ in a box around the domain's outer edge plus 1° on every side.
     keep the same size relative to the spacing on every map. A key arrow
     (50, 20, 10, 5 or 2 kt, the largest that fits) shows each map's scale,
     bottom right.
-  - Requesting `surface_wind_speed` alone also makes `u10`/`v10`, which the
-    vectors are drawn from.
+  - Requesting any of these fields also makes `u10`/`v10` (from WRF), which
+    the vectors are drawn from. If WRF is in the run only for that (e.g.
+    `--variables waves`), it publishes just `u10`/`v10` and no maps.
 
 ### 2 m temperature
 

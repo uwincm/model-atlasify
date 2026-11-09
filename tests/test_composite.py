@@ -315,3 +315,29 @@ def test_t2m_maps_with_wind_vectors(tmp_path, monkeypatch, capsys):
     images = run_out(out, run) / "model-images" / "full"
     assert len(list((images / "t2m").glob("*.png"))) == 2
     assert "2 m temperature" in (run_out(out, run) / "model-images.html").read_text()
+
+
+@pytest.mark.parametrize("variable", ["precipitation", "precipitation_interval"])
+def test_precipitation_maps_have_wind_vectors(tmp_path, monkeypatch, variable):
+    from modelatlasify.plotting import maps
+
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 2))
+    saved = []
+    real_draw = maps._draw_map
+    monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (
+        saved.append((str(path), bool(k.get("vectors")))), real_draw(path, *a, **k))[1])
+    assert main([str(run), "-o", str(tmp_path / "atlas"), "--variables", variable,
+                 "--no-validate"]) == 0
+    mine = [v for p, v in saved if f"{variable}." in p.rsplit("/", 1)[-1]]
+    assert mine and all(mine)
+
+
+def test_olr_maps_have_no_wind_vectors():
+    from modelatlasify.core.variables import get_variable
+
+    assert get_variable("olr_precipitation").vectors is None  # top-of-atmosphere field
+    for v in ("precipitation", "precipitation_interval", "spray_mass_flux",
+              "spray_latent_heat_flux", "spray_sensible_heat_flux", "significant_wave_height",
+              "mean_wave_period", "dominant_wave_period", "surface_wind_speed", "t2m"):
+        assert get_variable(v).vectors == ("u10", "v10")

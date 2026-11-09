@@ -59,6 +59,7 @@ PRECIPITATION = register(
         extend="max",
         transparent_below=0.1,
         constant_is_suspicious=False,
+        vectors=("u10", "v10"),  # 10 m wind vectors on the maps
         aliases=("precip", "precipitation", "rain", "precipitation_accumulated"),
     )
 )
@@ -82,6 +83,7 @@ PRECIPITATION_INTERVAL = register(
         extend="max",
         transparent_below=0.1,
         constant_is_suspicious=False,
+        vectors=("u10", "v10"),  # 10 m wind vectors on the maps
         aliases=("precip", "precipitation", "rain", "precipitation_rate"),
     )
 )
