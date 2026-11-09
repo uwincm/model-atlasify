@@ -25,6 +25,7 @@ SPRAY_MASS_FLUX = register(
         extend="max",
         transparent_below=_MASS_FLUX_LEVELS[0],
         constant_is_suspicious=False,  # 0 everywhere at initialization or in light winds
+        vectors=("u10", "v10"),  # 10 m wind vectors on the maps
         aliases=("spray", "mspr", "spray_mass"),
     )
 )
@@ -43,6 +44,7 @@ SPRAY_LATENT_HEAT_FLUX = register(
         extend="max",
         transparent_below=0.01,
         constant_is_suspicious=False,
+        vectors=("u10", "v10"),  # 10 m wind vectors on the maps
         aliases=("spray", "hlspr", "spray_lhf"),
     )
 )
@@ -61,6 +63,7 @@ SPRAY_SENSIBLE_HEAT_FLUX = register(
         extend="max",
         transparent_below=0.001,
         constant_is_suspicious=False,
+        vectors=("u10", "v10"),  # 10 m wind vectors on the maps
         aliases=("spray", "hsspr", "spray_shf"),
     )
 )

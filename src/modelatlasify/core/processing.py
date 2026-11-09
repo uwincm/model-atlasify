@@ -188,9 +188,16 @@ def _close_worker() -> None:
     _worker.clear()
 
 
-def _process_time(task: tuple[str, str, int]) -> _TimeResult:
-    """Compute, check, write and plot every variable at one valid time."""
-    run_id, dataset_id, ti = task
+#: Wind GeoTIFFs of another dataset at one valid time, for vectors:
+#: (dataset_id, time index, eastward GeoTIFF, northward GeoTIFF).
+VectorSource = tuple[str, int, Path, Path]
+
+
+def _process_time(task: tuple[str, str, int, list[VectorSource]]) -> _TimeResult:
+    """Compute, check, write and plot every variable at one valid time. The
+    last task element is other models' wind at this time (coarsest first),
+    for the vectors on maps of a model that makes no wind of its own."""
+    run_id, dataset_id, ti, other_winds = task
     ds: ModelDataset = _worker["datasets"][(run_id, dataset_id)]
     adapter: ModelAdapter = _worker["adapters"][ds.model]
     plot_field = _worker["plot_field"]
@@ -205,7 +212,7 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
             if plot_field is not None and var.draws in computed:
                 fld = dataclasses.replace(computed[var.draws], variable=vname)
                 png = item_dir / f"{vname}.png"
-                _plot_item(png, ds, ti, fld, var, computed)
+                _plot_item(png, ds, ti, fld, var, computed, other_winds)
                 res.assets.append(AssetRecord(f"{vname}_map", png, vname, "visual",
                                               dataclasses.replace(fld, data=None)))
                 res.n_png += 1
@@ -231,7 +238,7 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
         mapped = plot_field is not None and var.maps
         if mapped:
             png = item_dir / f"{vname}.png"
-            _plot_item(png, ds, ti, fld, var, computed)
+            _plot_item(png, ds, ti, fld, var, computed, other_winds)
         meta = dataclasses.replace(fld, data=None)  # the catalog needs no pixels
         res.assets.append(AssetRecord(vname, tif, vname, "data", meta, info))
         res.n_tif += 1
@@ -242,15 +249,19 @@ def _process_time(task: tuple[str, str, int]) -> _TimeResult:
 
 
 def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
-               var: VariableDefinition, computed: dict[str, FieldResult]) -> None:
+               var: VariableDefinition, computed: dict[str, FieldResult],
+               other_winds: list[VectorSource] = ()) -> None:
     """Per-item map of ``fld`` (for a map-only product, the field it draws,
     renamed to the product), with the product's overlay taken from ``computed``
-    (the fields that passed their checks at this time)."""
+    (the fields that passed their checks at this time). Wind vectors come from
+    ``computed`` too, or else from ``other_winds`` (another model's)."""
     style = get_variable(var.draws) if var.draws else var
     over = computed.get(var.overlay) if var.overlay else None
     vectors = None  # wind arrows
     if var.vectors and all(c in computed for c in var.vectors):
-        vectors = tuple(computed[c].data for c in var.vectors)
+        vectors = [(*(computed[c].data for c in var.vectors), ds.grid_at(ti))]
+    elif var.vectors and other_winds:
+        vectors = _read_vectors(ds.run_id, other_winds)
     title, subtitle = _titles(ds, fld, style.long_name, style.units, over)
     _worker["plot_field"](png, fld, ds.grid_at(ti), style, title, subtitle,
                           overlay=(get_variable(var.overlay), over) if var.overlay else None,
@@ -282,15 +293,15 @@ class _CompositeTask:
     # (GeoTIFF, metadata) or None, and one GeoTIFF or None per entry of nests.
     overlay_base: tuple[Path, FieldResult] | None = None
     overlay_nests: list[Path | None] = field(default_factory=list)
-    # Wind vectors (VariableDefinition.vectors), if any: the base's (u, v)
-    # GeoTIFFs or None, and (u, v) or None per entry of nests.
-    vector_base: tuple[Path, Path] | None = None
-    vector_nests: list[tuple[Path, Path] | None] = field(default_factory=list)
+    # Wind vectors (VariableDefinition.vectors), coarsest first: from every
+    # dataset of the run (of any model) with wind at this time.
+    vectors: list[VectorSource] = field(default_factory=list)
 
 
 def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
                      products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]],
-                     area: SubArea | None, prefix: str, edge: bool = False
+                     area: SubArea | None, prefix: str, edge: bool = False,
+                     run_datasets: list[ModelDataset] | None = None
                      ) -> list[_CompositeTask]:
     """Composite maps of one run over the outermost domain's whole area, or
     over a lon/lat sub-area.
@@ -300,7 +311,9 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
     the base's (e.g. not when a nest started accumulating later); otherwise, or
     when it has no product at that time, only its outline is drawn. Moving
     nests are drawn where they were at that time; a moving nest without
-    output at that time is left out, since its position is unknown.
+    output at that time is left out, since its position is unknown. Wind
+    vectors are taken from every dataset in ``run_datasets`` (default:
+    ``datasets``) that has them at that time, so e.g. DWM maps get WRF's.
     """
     base, *nests = sorted(datasets, key=lambda d: d.dataset_id)
     plot_area = FULL_AREA if area is None else area.name
@@ -325,13 +338,9 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
                 meta = dataclasses.replace(meta, variable=vname)
             over_name = var.overlay
             over_base = products.get((base.dataset_id, valid, over_name)) if over_name else None
-
-            def uv(dataset_id: str) -> tuple[Path, Path] | None:
-                tifs = [products.get((dataset_id, valid, c)) for c in var.vectors or ()]
-                return tuple(t[0] for t in tifs) if tifs and all(tifs) else None
-
-            vec_base = uv(base.dataset_id)
-            layers, over_layers, vec_layers = [], [], []
+            vectors = (_vector_sources(run_datasets or datasets, valid, var.vectors, products)
+                       if var.vectors else [])
+            layers, over_layers = [], []
             for nest in nests:
                 ni = nest_times[nest.dataset_id].get(valid)
                 if ni is None and nest.moving:
@@ -341,13 +350,31 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
                 if over_base is not None:
                     over_layers.append(same_period(
                         products.get((nest.dataset_id, valid, over_name)), over_base[1]))
-                if vec_base is not None:
-                    vec_layers.append(uv(nest.dataset_id))
             tasks.append(_CompositeTask(
                 base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
                 area, edge, (base.dataset_id, bi, tif, meta), layers,
-                over_base, over_layers, vec_base, vec_layers))
+                over_base, over_layers, vectors))
     return tasks
+
+
+def _vector_sources(datasets: list[ModelDataset], valid: datetime, components: tuple[str, str],
+                    products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]]
+                    ) -> list[VectorSource]:
+    """The datasets' published wind (``components``) at ``valid``, coarsest
+    (lowest dataset id, e.g. d01) first."""
+    out = []
+    for d in sorted(datasets, key=lambda d: d.dataset_id):
+        tifs = [products.get((d.dataset_id, valid, c)) for c in components]
+        if all(tifs):
+            out.append((d.dataset_id, d.valid_times.index(valid), tifs[0][0], tifs[1][0]))
+    return out
+
+
+def _read_vectors(run_id: str, sources: list[VectorSource]) -> list:
+    """Vector layers for the map code from published wind GeoTIFFs."""
+    datasets = _worker["datasets"]
+    return [(_read_tif(u), _read_tif(v), datasets[(run_id, did)].grid_at(ti))
+            for did, ti, u, v in sources]
 
 
 def _area_in_run(area: SubArea, datasets: list[ModelDataset]) -> bool:
@@ -384,11 +411,7 @@ def _plot_composite(task: _CompositeTask) -> Path:
             (None if t is None else _read_tif(t), grid)
             for t, (_, grid) in zip(task.overlay_nests, nests)]
         overlay = (get_variable(var.overlay), over_layers)
-    vectors = None
-    if task.vector_base is not None:
-        vectors = [(*map(_read_tif, task.vector_base), base_ds.grid_at(bi))] + [
-            (*map(_read_tif, uv), grid)
-            for uv, (_, grid) in zip(task.vector_nests, nests) if uv is not None]
+    vectors = _read_vectors(task.run_id, task.vectors) if task.vectors else None
     title, subtitle = _titles(base_ds, meta, style.long_name, style.units,
                               None if task.overlay_base is None else over_meta)
     overlaid = [(nid, grid) for (nid, _, tif), (_, grid) in zip(task.nests, nests)
@@ -425,13 +448,14 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
     try:
         runs = discover(adapter_list, options.inputs, options.domains, report, options.cut_dirs)
         used = [adapters[m] for m in dict.fromkeys(d.model for ds in runs.values() for d in ds)]
-        variables = _with_dependencies(_variables_for(options.variables, used), report)
+        primary = _variables_for(options.variables, used)
+        variables = _with_dependencies(primary, report,
+                                       {v for a in used for v in a.supported_variables()})
         if options.variables is not None:
             for datasets in runs.values():
                 _warn_unavailable(datasets, variables, adapters, report)
         for run_id in list(runs):  # leave out models that make none of the variables
-            keep = [d for d in runs[run_id]
-                    if set(variables) & set(adapters[d.model].dataset_variables(d))]
+            keep = _datasets_to_keep(runs[run_id], primary, adapters)
             for d in runs[run_id]:
                 if d not in keep:
                     report(f"  ({d.model} {d.dataset_id} of '{d.run_path}' skipped: it provides "
@@ -483,8 +507,17 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
         for run_id, datasets in runs.items():
             items = []
             products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]] = {}
-            for ds in datasets:
-                tasks = [(run_id, ds.dataset_id, ti) for ti in range(len(ds.valid_times))]
+            # Datasets that make the wind first, so other models' maps can use it.
+            wind_vars = {c for v in variables for c in (get_variable(v).vectors or ())}
+            makes_wind = {d.dataset_id for d in datasets
+                          if wind_vars and wind_vars <= set(adapters[d.model].dataset_variables(d))}
+            for ds in sorted(datasets, key=lambda d: d.dataset_id not in makes_wind):
+                wind_from = [d for d in datasets
+                             if d.dataset_id in makes_wind and d.model != ds.model]
+                tasks = [(run_id, ds.dataset_id, ti,
+                          _vector_sources(wind_from, valid, ("u10", "v10"), products)
+                          if wind_from and ds.dataset_id not in makes_wind else [])
+                         for ti, valid in enumerate(ds.valid_times)]
                 results = tqdm(mapper(tasks), total=len(tasks), desc=f"{ds.run_name} {ds.dataset_id}",
                                unit="time", file=sys.stderr, disable=not progress)
                 for res in results:
@@ -513,7 +546,8 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                             continue
                         tasks += _composite_tasks(builder.run_dir(group[0]), group, variables,
                                                   products, area, options.image_prefix,
-                                                  edge=adapters[model].outline_domain_edge)
+                                                  edge=adapters[model].outline_domain_edge,
+                                                  run_datasets=datasets)
                 for _ in tqdm(mapper_composite(tasks), total=len(tasks),
                               desc=f"{datasets[0].run_name} composite maps", unit="map", file=sys.stderr,
                               disable=not progress):
@@ -561,16 +595,36 @@ def _variables_for(requested: list[str] | None, adapters: list[ModelAdapter]) ->
     return list(requested)
 
 
-def _with_dependencies(variables: list[str], report: Callable[[str], None]) -> list[str]:
+def _datasets_to_keep(datasets: list[ModelDataset], primary: list[str],
+                      adapters: dict[str, ModelAdapter]) -> list[ModelDataset]:
+    """The datasets that make at least one of the ``primary`` (requested)
+    variables, plus those that make something the kept ones' maps need (e.g.
+    WRF's u10/v10 for vectors on DWM maps). A dataset that would only make
+    such dependencies, for maps nobody makes, is left out."""
+    made = {d.dataset_id: set(adapters[d.model].dataset_variables(d)) for d in datasets}
+    wanted = [d for d in datasets if made[d.dataset_id] & set(primary)]
+    needed = {dep for d in wanted for v in made[d.dataset_id] & set(primary)
+              for dep in _dependencies(get_variable(v))}
+    return [d for d in datasets if d in wanted or made[d.dataset_id] & needed]
+
+
+def _dependencies(var: VariableDefinition) -> list[str]:
+    """Variables whose fields ``var``'s maps draw (draws, overlay, vectors)."""
+    return [d for d in (var.draws, var.overlay, *(var.vectors or ())) if d]
+
+
+def _with_dependencies(variables: list[str], report: Callable[[str], None],
+                       makeable: set[str] | None = None) -> list[str]:
     """``variables`` plus the variables their maps need (olr_precipitation
-    draws olr and overlays precipitation_interval; surface_wind_speed draws
-    u10/v10 vectors), each placed just before
-    the first variable that uses it so it is computed first at every time."""
+    draws olr and overlays precipitation_interval; surface maps draw u10/v10
+    vectors), each placed just before the first variable that uses it so it
+    is computed first at every time. Dependencies no model found can make
+    (``makeable``; e.g. u10/v10 in a DWM-only run) are left out."""
     out: list[str] = []
     for v in variables:
         var = get_variable(v)
-        for dep in (var.draws, var.overlay, *(var.vectors or ())):
-            if dep and dep not in out:
+        for dep in _dependencies(var):
+            if dep not in out and (makeable is None or dep in makeable):
                 if dep not in variables:
                     report(f"Also making {dep}: the {v} maps use it.")
                 out.append(dep)
