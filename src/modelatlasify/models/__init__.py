@@ -15,7 +15,11 @@ def get_adapter(name: str) -> ModelAdapter:
         from modelatlasify.models.dwm import DWMAdapter
 
         return DWMAdapter()
+    if key == "hycom":
+        from modelatlasify.models.hycom import HYCOMAdapter
+
+        return HYCOMAdapter()
     raise KeyError(f"Unknown model '{name}'. Available: {', '.join(AVAILABLE_MODELS)}")
 
 
-AVAILABLE_MODELS = ("wrf", "dwm")
+AVAILABLE_MODELS = ("wrf", "dwm", "hycom")

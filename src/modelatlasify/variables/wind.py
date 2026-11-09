@@ -6,16 +6,15 @@ import numpy as np
 from pyproj import Transformer
 
 from modelatlasify.core.model import GridDefinition
-from modelatlasify.core.variables import VariableDefinition, register
+from modelatlasify.core.variables import VariableDefinition, VectorStyle, register
 
-#: Wind vectors on surface wind speed maps: arrow length on the ground per
-#: speed, the speed at which arrows stop growing, the arrow spacing, and the
-#: fewest arrows across a map (smaller maps get a closer spacing).
-VECTOR_KM_PER_KNOT = 100.0 / 10.0
-VECTOR_MAX_KNOTS = 70.0
-VECTOR_SPACING_KM = 250.0
-VECTOR_MIN_ACROSS = 20
 KNOTS_PER_M_S = 3600.0 / 1852.0
+
+#: 10 m wind vectors: one every 250 km (at least 20 across a map), 100 km per
+#: 10 kt at that spacing, growing up to 70 kt.
+WIND_VECTORS = VectorStyle(spacing_km=250.0, min_across=20, km_per_unit=100.0 / 10.0,
+                           max_speed=70.0, units="kt", units_per_m_s=KNOTS_PER_M_S,
+                           key_speeds=(50, 20, 10, 5, 2))
 
 SURFACE_WIND_SPEED = register(
     VariableDefinition(

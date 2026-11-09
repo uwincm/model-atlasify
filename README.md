@@ -37,6 +37,11 @@ line.
   it is resampled onto a regular lon/lat grid, with a warning (see
   [DWM grids](#dwm-grids)). The start time comes from `namelists/main.nml`
   when present.
+- **HYCOM** ocean model output: `archv.<YYYY_DDD_HH>.[ab]` (full 3-D) and/or
+  `archs.<YYYY_DDD_HH>.[ab]` (surface only) archives next to
+  `regional.grid.[ab]`, on its own or inside a coupled run directory. It is
+  used automatically whenever that output exists (and `uwin.nml`, if any,
+  does not set `ocean = .F.`). See [HYCOM ocean](#hycom-ocean).
 - **Surface wind** (10 m), in m s-1: speed, plus earth-relative eastward and
   northward components (`u10`, `v10`, GeoTIFFs only). Speed maps show wind
   vectors on the composites and the per-item maps
@@ -54,6 +59,10 @@ line.
   wave period (s). Land is missing. Wave height maps use "turbo" with the
   lowest band (0–0.5 m) white, so calm seas and the wind vectors over them
   stand out.
+- **Ocean surface** (HYCOM): sea surface temperature (`sst`, degC), sea
+  surface salinity (`surface_salinity`, psu) and surface current speed
+  (`surface_currents`, m s-1) maps with surface current vectors; GeoTIFFs of
+  those plus the eastward/northward currents (`surface_u`, `surface_v`).
 - **GeoTIFF** output (COG, float32, NaN nodata, CRS + affine transform, units and
   provenance tags)
 - **PNG maps** in the native projection
@@ -227,8 +236,8 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 |---|---|
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`), or `s3://bucket/prefix` to write to S3 (see [Output to S3](#output-to-s3)). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
-| `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf` or `dwm` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
-| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `temperature` (= `t2m`, which also makes `u10`/`v10` for its vectors), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
+| `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf`, `dwm` or `hycom` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `temperature` (= `t2m`, which also makes `u10`/`v10` for its vectors), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `ocean` (= `sst` + `surface_salinity` + `surface_currents` + `surface_u` + `surface_v`; `currents` = the last three), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
 | `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
@@ -447,6 +456,39 @@ in a box around the domain's outer edge plus 1° on every side.
   shows OLR alone.
 - A run whose output has no `OLR` skips both products. You get a warning only
   if you asked for them with `--variables`.
+
+### HYCOM ocean
+
+- Archives are read with a small built-in reader for HYCOM's "a/b" format
+  (adapted from [pyhycom](https://github.com/uwincm/pyhycom), MIT License;
+  see `models/hycom/hycom_io.py`). Only the needed top-layer records are
+  read, by byte offset, so the 1+ GB `archv` files are fast to process.
+- Valid times come from the file names (`archv.2011_245_01` = 2011, day 245,
+  01 UTC). The model day in the `.b` file, written to only 3 decimals (±45 s),
+  must agree within 2 minutes, or the file is skipped as inconsistent. When
+  `archv` and `archs` exist for the same time, `archs` is used. The start
+  time (for the forecast lead time) is `startDate` in `uwin.nml`, when
+  present.
+- The grid comes from `plon`/`plat` in `regional.grid`: Mercator, else a
+  regular lon/lat grid, else resampled (nearest cell) to lon/lat with a
+  warning, as for DWM.
+- `sst` and `surface_salinity` are the top layer's `temp` and `salin`; land
+  is missing. Their maps use the [cmocean](https://matplotlib.org/cmocean/)
+  colour maps `thermal` (10–32 C, every 1 C) and `haline` (30–38 psu, every
+  0.5).
+- Currents are the top layer's **total** velocity: the baroclinic `u-vel.`/
+  `v-vel.` plus the barotropic `u_btrop`/`v_btrop`. On HYCOM's C grid, u is
+  on each cell's west face and v on its south face; they are averaged to the
+  cell centre. A face against land carries no flow and counts as 0. The
+  easternmost column and northernmost row have no outer face in the file and
+  are missing. `surface_currents` = sqrt(u² + v²). Grids rotated from
+  east/north (`pang` ≠ 0) get no current products (with a warning), rather
+  than risk a wrong rotation.
+- Ocean maps draw **current** vectors, not wind: twice as dense as the wind
+  vectors (one every 125 km, at least 40 across a map), 125 km per 1 m s-1 at
+  that spacing (so a 1 m s-1 arrow is one spacing long), growing up to
+  2 m s-1. Closer spacing on small maps shortens arrows in proportion, as for
+  the wind. The key is in m/s.
 
 ### Sea spray
 

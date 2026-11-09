@@ -32,10 +32,8 @@ from pyproj import CRS, Transformer  # noqa: E402
 from modelatlasify.core import storage  # noqa: E402
 from modelatlasify.core.areas import FULL_AREA, SubArea  # noqa: E402
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
-from modelatlasify.core.variables import VariableDefinition  # noqa: E402
-from modelatlasify.variables.wind import (KNOTS_PER_M_S, VECTOR_KM_PER_KNOT,  # noqa: E402
-                                          VECTOR_MAX_KNOTS, VECTOR_MIN_ACROSS,
-                                          VECTOR_SPACING_KM)
+from modelatlasify.core.variables import VariableDefinition, VectorStyle  # noqa: E402
+from modelatlasify.variables.wind import WIND_VECTORS  # noqa: E402
 
 log = logging.getLogger(__name__)
 _coastline_warning_shown = False
@@ -162,7 +160,7 @@ def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
     title: str, subtitle: str = "", dpi: int = 110,
     overlay: tuple[VariableDefinition, FieldResult | None] | None = None,
-    vectors: VectorLayers | None = None,
+    vectors: VectorLayers | None = None, vector_style: VectorStyle | None = None,
 ) -> Path:
     """Map of one field over its grid's whole area. ``overlay`` is another
     field on the same grid drawn on top (None field = nothing to overlay);
@@ -174,7 +172,7 @@ def plot_field(
     # In a lon/lat box the grid's edge is inside the map: outline it.
     return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
                      outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi, overlay=over,
-                     vectors=vectors)
+                     vectors=vectors, vector_style=vector_style)
 
 
 def plot_composite(
@@ -182,6 +180,7 @@ def plot_composite(
     nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
     title: str, subtitle: str = "", area: SubArea | None = None, domain_edge: bool = False,
     dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
+    vector_style: VectorStyle | None = None,
 ) -> Path:
     """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
     grids drawn on top (finest last) and their boundaries outlined in black. A
@@ -196,7 +195,7 @@ def plot_composite(
     return _draw_map(path, view, [base, *nests], variable, title, subtitle,
                      outlines=[g for _, g in nests] + ([base_grid] if solid_edge else []),
                      dashed_outlines=[base_grid] if domain_edge and not solid_edge else [],
-                     dpi=dpi, overlay=overlay, vectors=vectors)
+                     dpi=dpi, overlay=overlay, vectors=vectors, vector_style=vector_style)
 
 
 def _draw_map(
@@ -204,6 +203,7 @@ def _draw_map(
     variable: VariableDefinition, title: str, subtitle: str = "",
     outlines: list[GridDefinition] = (), dashed_outlines: list[GridDefinition] = (),
     dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
+    vector_style: VectorStyle | None = None,
 ) -> Path:
     """Draw ``layers`` (coarsest first) in ``view``, ``overlay`` and wind
     ``vectors`` on top."""
@@ -228,7 +228,7 @@ def _draw_map(
             ax.plot(bx, by, color="black", linewidth=1.2, linestyle=style, transform=proj,
                     zorder=3)
     if vectors:
-        _draw_vectors(fig, ax, view, vectors)
+        _draw_vectors(fig, ax, view, vectors, vector_style or WIND_VECTORS)
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
         gl.top_labels = False
@@ -293,22 +293,24 @@ def _draw_layers(ax, view: MapView, layers: Layers, variable: VariableDefinition
     return img
 
 
-def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers) -> None:
-    """Wind arrows on a square lattice spaced VECTOR_SPACING_KM apart on the
-    ground, or closer if that gives fewer than VECTOR_MIN_ACROSS arrows across
-    the map (then exactly that many across, and as many rows as fit). Each is
-    taken from the finest grid covering it (nearest cell). Arrows are
-    VECTOR_KM_PER_KNOT long on the ground per knot (scaled down in proportion
-    when the spacing is closer than VECTOR_SPACING_KM, so arrows keep their
-    size relative to the spacing), up to VECTOR_MAX_KNOTS, and point along the
-    wind as it looks in the map's projection."""
+def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
+                  style: VectorStyle = WIND_VECTORS) -> None:
+    """Arrows (wind, currents) on a square lattice spaced ``style.spacing_km``
+    apart on the ground, or closer if that gives fewer than
+    ``style.min_across`` arrows across the map (then exactly that many across,
+    and as many rows as fit). Each is taken from the finest grid covering it
+    (nearest cell). Arrows are ``style.km_per_unit`` long on the ground per
+    unit of speed (scaled down in proportion when the spacing is closer, so
+    arrows keep their size relative to the spacing), up to
+    ``style.max_speed``, and point along the flow as it looks in the map's
+    projection."""
     x0, x1, y0, y1 = view.extent
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
     _, north_c = _ground_axes(view, np.array([cx]), np.array([cy]))
     per_m = float(np.hypot(*north_c[:, 0]))  # view units per metre at the centre
-    full_step = VECTOR_SPACING_KM * 1e3 * per_m
-    step = min(full_step, (x1 - x0) / VECTOR_MIN_ACROSS)
-    m_per_knot = VECTOR_KM_PER_KNOT * 1e3 * step / full_step  # ground metres per knot
+    full_step = style.spacing_km * 1e3 * per_m
+    step = min(full_step, (x1 - x0) / style.min_across)
+    m_per_unit = style.km_per_unit * 1e3 * step / full_step  # ground metres per speed unit
     gx, gy = np.meshgrid(np.arange(x0 + step / 2, x1, step), np.arange(y0 + step / 2, y1, step))
     gx, gy = gx.ravel(), gy.ravel()
     lon, lat = _view_to_lonlat(view, gx, gy)
@@ -334,7 +336,7 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers) -> None:
         return
     gx, gy, u, v, speed = gx[keep], gy[keep], u[keep], v[keep], speed[keep]
     east, north = _ground_axes(view, gx, gy)
-    length_m = np.minimum(speed * KNOTS_PER_M_S, VECTOR_MAX_KNOTS) * m_per_knot
+    length_m = np.minimum(speed * style.units_per_m_s, style.max_speed) * m_per_unit
     du = length_m * (u / speed * east[0] + v / speed * north[0])
     dv = length_m * (u / speed * east[1] + v / speed * north[1])
     q = ax.quiver(gx, gy, du, dv, angles="xy", scale_units="xy", scale=1, pivot="middle",
@@ -343,11 +345,11 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers) -> None:
     # Key: the largest round speed whose arrow fits beside the colour bar.
     ax.apply_aspect()  # equal-aspect maps can be narrower than their axes box
     map_width_frac = ax.get_position().width  # as a fraction of the figure
-    def key_frac(kt):
-        return kt * m_per_knot * per_m / (x1 - x0) * map_width_frac
-    key_kt = next((kt for kt in (50, 20, 10, 5) if key_frac(kt) <= 0.08), 2)
-    ax.quiverkey(q, 0.905, 0.095, key_kt * m_per_knot * per_m,
-                 f"{key_kt} kt\n(max {VECTOR_MAX_KNOTS:g})", coordinates="figure",
+    def key_frac(speed):
+        return speed * m_per_unit * per_m / (x1 - x0) * map_width_frac
+    key = next((s for s in style.key_speeds if key_frac(s) <= 0.08), style.key_speeds[-1])
+    ax.quiverkey(q, 0.905, 0.095, key * m_per_unit * per_m,
+                 f"{key:g} {style.units}\n(max {style.max_speed:g})", coordinates="figure",
                  labelpos="S", fontproperties={"size": 8})
 
 

@@ -22,6 +22,7 @@ dependencies = [
     "tqdm",
     "s3fs",
     "universal_pathlib",
+    "cmocean",
 ]
 
 [project.optional-dependencies]
@@ -63,6 +64,7 @@ tqdm = ">=4.60"
 jsonschema = ">=4.0"
 s3fs = ">=2024.1"  # -o s3://bucket/prefix
 universal_pathlib = ">=0.2.5"
+cmocean = ">=3.0"
 
 [tool.pixi.pypi-dependencies]
 modelatlasify = { path = ".", editable = true }
