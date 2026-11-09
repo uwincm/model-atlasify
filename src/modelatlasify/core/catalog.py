@@ -178,7 +178,8 @@ class CatalogBuilder:
             id=item_id(ds, valid), geometry=fp.geometry, bbox=fp.bbox, datetime=valid,
             properties=props,
         )
-        item.stac_extensions.append(FORECAST_EXTENSION)
+        if ds.reference_time is not None:  # the forecast fields are only set then
+            item.stac_extensions.append(FORECAST_EXTENSION)
 
         g = ds.grid_at(rec.time_index)
         proj = ProjectionExtension.ext(item, add_if_missing=True)

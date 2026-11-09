@@ -208,8 +208,9 @@ def test_wind_vectors_on_every_domain_and_composites(tmp_path, monkeypatch):
     write_wrfout(run, hourly(T0, 2), domain=2, nx=20, ny=16, dx=4000.0)
     calls = []
     real = maps._draw_vectors
-    monkeypatch.setattr(maps, "_draw_vectors", lambda fig, ax, view, vectors: (
-        calls.append((ax.figure, [g.width for _, _, g in vectors])), real(fig, ax, view, vectors)))
+    monkeypatch.setattr(maps, "_draw_vectors", lambda fig, ax, view, vectors, *a: (
+        calls.append((ax.figure, [g.width for _, _, g in vectors])),
+        real(fig, ax, view, vectors, *a)))
     saved = []
     real_draw = maps._draw_map
     monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (

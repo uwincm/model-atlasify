@@ -11,6 +11,19 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class VectorStyle:
+    """How vectors (e.g. wind, ocean currents) are drawn on maps."""
+
+    spacing_km: float  # arrow spacing on the ground on large maps
+    min_across: int  # smaller maps: closer spacing so this many fit across
+    km_per_unit: float  # arrow length on the ground per unit of speed, at spacing_km
+    max_speed: float  # arrows stop growing at this speed (in ``units``)
+    units: str  # speed units of the key, e.g. "kt"
+    units_per_m_s: float  # ``units`` per m s-1
+    key_speeds: tuple[float, ...]  # key arrow candidates, largest first
+
+
+@dataclass(frozen=True)
 class VariableDefinition:
     name: str  # file/asset key, e.g. "surface_wind_speed"
     long_name: str  # human-readable, e.g. "Surface wind speed"
@@ -41,6 +54,8 @@ class VariableDefinition:
     # maps. A model that does not make them (e.g. DWM) takes them from another
     # model of the same run (WRF) at the same valid time, when there is one.
     vectors: tuple[str, str] | None = None
+    # How those vectors are drawn (None = wind style, see variables.wind).
+    vector_style: VectorStyle | None = None
     # A spatially constant field (e.g. wind identically 0) almost always means
     # zero-filled/corrupt input. False for fields that are legitimately
     # constant sometimes (precipitation is all 0 at initialization).

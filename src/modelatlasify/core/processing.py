@@ -193,10 +193,12 @@ def _close_worker() -> None:
 VectorSource = tuple[str, int, Path, Path]
 
 
-def _process_time(task: tuple[str, str, int, list[VectorSource]]) -> _TimeResult:
+def _process_time(task: tuple[str, str, int, dict[tuple[str, str], list[VectorSource]]]
+                  ) -> _TimeResult:
     """Compute, check, write and plot every variable at one valid time. The
-    last task element is other models' wind at this time (coarsest first),
-    for the vectors on maps of a model that makes no wind of its own."""
+    last task element is other models' vectors at this time per vector pair
+    (e.g. WRF's u10/v10, coarsest first), for maps of a model that does not
+    make that pair itself."""
     run_id, dataset_id, ti, other_winds = task
     ds: ModelDataset = _worker["datasets"][(run_id, dataset_id)]
     adapter: ModelAdapter = _worker["adapters"][ds.model]
@@ -250,7 +252,7 @@ def _process_time(task: tuple[str, str, int, list[VectorSource]]) -> _TimeResult
 
 def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
                var: VariableDefinition, computed: dict[str, FieldResult],
-               other_winds: list[VectorSource] = ()) -> None:
+               other_winds: dict[tuple[str, str], list[VectorSource]] | None = None) -> None:
     """Per-item map of ``fld`` (for a map-only product, the field it draws,
     renamed to the product), with the product's overlay taken from ``computed``
     (the fields that passed their checks at this time). Wind vectors come from
@@ -260,12 +262,12 @@ def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
     vectors = None  # wind arrows
     if var.vectors and all(c in computed for c in var.vectors):
         vectors = [(*(computed[c].data for c in var.vectors), ds.grid_at(ti))]
-    elif var.vectors and other_winds:
-        vectors = _read_vectors(ds.run_id, other_winds)
+    elif var.vectors and (other_winds or {}).get(var.vectors):
+        vectors = _read_vectors(ds.run_id, other_winds[var.vectors])
     title, subtitle = _titles(ds, fld, style.long_name, style.units, over)
     _worker["plot_field"](png, fld, ds.grid_at(ti), style, title, subtitle,
                           overlay=(get_variable(var.overlay), over) if var.overlay else None,
-                          vectors=vectors)
+                          vectors=vectors, vector_style=var.vector_style)
 
 
 # ------------------------------------------------------ composite maps
@@ -426,7 +428,8 @@ def _plot_composite(task: _CompositeTask) -> Path:
         subtitle += f"  |  area '{task.area.name}'"
     return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid_at(bi)),
                                      nests, style, title, subtitle, area=task.area,
-                                     domain_edge=task.edge, overlay=overlay, vectors=vectors)
+                                     domain_edge=task.edge, overlay=overlay, vectors=vectors,
+                                     vector_style=var.vector_style)
 
 
 def _log_levels() -> dict[str, int]:
@@ -507,16 +510,22 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
         for run_id, datasets in runs.items():
             items = []
             products: dict[tuple[str, datetime, str], tuple[Path, FieldResult]] = {}
-            # Datasets that make the wind first, so other models' maps can use it.
-            wind_vars = {c for v in variables for c in (get_variable(v).vectors or ())}
-            makes_wind = {d.dataset_id for d in datasets
-                          if wind_vars and wind_vars <= set(adapters[d.model].dataset_variables(d))}
-            for ds in sorted(datasets, key=lambda d: d.dataset_id not in makes_wind):
-                wind_from = [d for d in datasets
-                             if d.dataset_id in makes_wind and d.model != ds.model]
-                tasks = [(run_id, ds.dataset_id, ti,
-                          _vector_sources(wind_from, valid, ("u10", "v10"), products)
-                          if wind_from and ds.dataset_id not in makes_wind else [])
+            # Datasets that make vectors (WRF wind, HYCOM currents) go first, so
+            # the maps of a model that does not make a pair can use another's.
+            vector_pairs = {get_variable(v).vectors for v in variables} - {None}
+            makers = {pair: {d.dataset_id for d in datasets
+                             if set(pair) <= set(adapters[d.model].dataset_variables(d))}
+                      for pair in vector_pairs}
+            makes_any = set().union(*makers.values())
+            for ds in sorted(datasets, key=lambda d: d.dataset_id not in makes_any):
+                def other_vectors(valid: datetime, ds: ModelDataset = ds
+                                  ) -> dict[tuple[str, str], list[VectorSource]]:
+                    return {pair: _vector_sources(
+                                [d for d in datasets if d.dataset_id in ids and d.model != ds.model],
+                                valid, pair, products)
+                            for pair, ids in makers.items() if ds.dataset_id not in ids}
+
+                tasks = [(run_id, ds.dataset_id, ti, other_vectors(valid))
                          for ti, valid in enumerate(ds.valid_times)]
                 results = tqdm(mapper(tasks), total=len(tasks), desc=f"{ds.run_name} {ds.dataset_id}",
                                unit="time", file=sys.stderr, disable=not progress)
