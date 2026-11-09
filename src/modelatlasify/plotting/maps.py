@@ -80,6 +80,10 @@ def cartopy_projection(crs: CRS) -> ccrs.Projection:
 def _norm_and_cmap(variable: VariableDefinition, data: np.ndarray):
     cmap = plt.get_cmap(variable.cmap).with_extremes(bad=(0.0, 0.0, 0.0, 0.0))
     if variable.levels:
+        if len(variable.levels) - 1 == cmap.N:
+            # Exactly one colour per interval (e.g. t2m_29lev): out-of-range
+            # values take the colour map's under/over colours.
+            return mcolors.BoundaryNorm(variable.levels, ncolors=cmap.N), cmap
         return mcolors.BoundaryNorm(variable.levels, ncolors=cmap.N, extend=variable.extend), cmap
     finite = data[np.isfinite(data)]
     vmin = variable.vmin if variable.vmin is not None else (float(finite.min()) if finite.size else 0.0)
@@ -384,8 +388,10 @@ def _colorbar(fig, rect: list[float], mappable, variable: VariableDefinition) ->
     cb.set_label(f"{variable.long_name} ({variable.units})", fontsize=9)
     cb.ax.tick_params(labelsize=8)
     if variable.levels:
-        cb.set_ticks(variable.levels)
-        cb.set_ticklabels([f"{v:g}" for v in variable.levels])
+        # Label every level, or every other one when there are too many to fit.
+        ticks = variable.levels if len(variable.levels) <= 20 else variable.levels[::2]
+        cb.set_ticks(ticks)
+        cb.set_ticklabels([f"{v:g}" for v in ticks])
 
 
 # ------------------------------------------------- placing grids on another

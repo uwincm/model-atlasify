@@ -215,10 +215,10 @@ def test_variable_aliases():
                                         "spray_sensible_heat_flux"]
     assert resolve_names(["mspr", "hlspr", "hsspr"]) == resolve_names(["spray"])
     with pytest.raises(KeyError, match="Unknown variable"):
-        resolve_names(["temperature"])
+        resolve_names(["humidity"])
 
 
-SPRAY_INCLUDE = ("U10", "V10", "RAINC", "RAINNC", "OLR", *SPRAY_FIELDS)
+SPRAY_INCLUDE = ("U10", "V10", "RAINC", "RAINNC", "OLR", "T2", *SPRAY_FIELDS)
 
 
 @pytest.mark.parametrize("variable,scale", [("spray_mass_flux", 1e-5),
@@ -378,3 +378,55 @@ def test_u10_v10_unavailable_without_u10(tmp_path):
     unavailable = adapter.unavailable_variables(ds)
     assert "no U10/V10" in unavailable["u10"] and "no U10/V10" in unavailable["v10"]
     assert "surface_wind_speed" in adapter.dataset_variables(ds)  # falls back to U/V
+
+
+# ------------------------------------------------------------------- t2m
+def test_t2m_in_celsius(tmp_path):
+    write_wrfout(tmp_path / "r", hourly(T0, 2), include=("U10", "V10", "T2"))
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    assert "t2m" in adapter.dataset_variables(ds)
+    f = adapter.compute(ds, "t2m", 1)
+    nx = ds.grid.width
+    np.testing.assert_allclose(
+        f.data, np.broadcast_to(-10.0 + 50.0 * np.arange(nx) / nx, f.data.shape), atol=1e-4)
+    assert f.provenance["source_variables"] == ["T2"]
+
+
+def test_t2m_unavailable_without_t2(wrf_run):
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(wrf_run)
+    assert "no T2" in adapter.unavailable_variables(ds)["t2m"]
+
+
+def test_t2m_zero_filled_is_rejected(tmp_path):
+    import netCDF4
+
+    paths = write_wrfout(tmp_path / "r", hourly(T0, 1), include=("T2",))
+    with netCDF4.Dataset(paths[0], "a") as nc:
+        nc["T2"][0, :5, :] = 0.0
+    adapter = WRFAdapter()
+    (ds,) = adapter.discover(tmp_path / "r")
+    with pytest.raises(FieldQualityError, match="0 K"):
+        adapter.compute(ds, "t2m", 0)
+
+
+def test_t2m_levels_and_colours():
+    import matplotlib.colors as mcolors
+
+    from modelatlasify.core.variables import get_variable
+    from modelatlasify.plotting.maps import _norm_and_cmap
+
+    var = get_variable("t2m")
+    assert var.levels[0] == -10.0 and var.levels[-1] == 35.0
+    assert np.allclose(np.diff(var.levels), 1.5) and len(var.levels) == 31
+    assert var.vectors == ("u10", "v10")
+    assert resolve_names(["temperature"]) == ["t2m"]
+    norm, cmap = _norm_and_cmap(var, np.array([0.0]))
+    first, last = (np.array(c) / 255 for c in ((109, 227, 255), (163, 112, 255)))
+    rgba = lambda x: np.array(cmap(norm(np.array([x])))[0][:3])  # noqa: E731
+    assert np.allclose(rgba(-9.0), first) and np.allclose(rgba(34.0), last)
+    assert np.allclose(rgba(-30.0), first) and np.allclose(rgba(45.0), last)  # extends
+    assert np.allclose(rgba(0.1), np.array((0, 0, 128)) / 255)  # -1 to 0.5 C: navy
+    assert np.allclose(rgba(5.5), np.array((255, 255, 255)) / 255)  # 5 to 6.5 C: white
+    assert isinstance(norm, mcolors.BoundaryNorm)

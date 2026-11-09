@@ -40,6 +40,7 @@ line.
 - **Surface wind** (10 m), in m s-1: speed, plus earth-relative eastward and
   northward components (`u10`, `v10`, GeoTIFFs only). Speed maps show wind
   vectors on the composites and the per-item maps
+- **2 m temperature** (`t2m`), in degC, with 10 m wind vectors on its maps
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration
   - accumulated over each output interval
@@ -116,6 +117,7 @@ atlas/
     │   │   │   └── uwincm.full.precipitation.20261006T010000Z.png
     │   │   ├── precipitation_interval/
     │   │   ├── olr_precipitation/            # OLR with interval precipitation on top
+    │   │   ├── t2m/                          # 2 m temperature with wind vectors
     │   │   └── surface_wind_speed/
     │   └── gulf/                             # a --plot-sub-areas area (lon/lat map)
     │       └── precipitation/ ...            #   uwincm.gulf.precipitation.<time>.png
@@ -125,6 +127,7 @@ atlas/
         │   ├── surface_wind_speed.tif
         │   ├── surface_wind_speed.png        # with wind vectors
         │   ├── u10.tif, v10.tif              # earth-relative 10 m wind components
+        │   ├── t2m.tif / .png                # 2 m temperature (map with wind vectors)
         │   ├── precipitation.tif
         │   └── precipitation.png
         └── d01-20261006T010000Z/
@@ -223,7 +226,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`), or `s3://bucket/prefix` to write to S3 (see [Output to S3](#output-to-s3)). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf` or `dwm` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
-| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `temperature` (= `t2m`, which also makes `u10`/`v10` for its vectors), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
 | `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
@@ -373,6 +376,20 @@ in a box around the domain's outer edge plus 1° on every side.
     bottom right.
   - Requesting `surface_wind_speed` alone also makes `u10`/`v10`, which the
     vectors are drawn from.
+
+### 2 m temperature
+
+- `t2m` = WRF `T2` (2 m diagnostic), instantaneous, converted from K to degC.
+  Units other than `K` are an error. More than 1% of cells at exactly 0 K
+  means zero-filled input and the field is skipped; fewer such cells are set
+  to missing.
+- Maps use the NCL colour table
+  [`t2m_29lev`](https://www.ncl.ucar.edu/Document/Graphics/ColorTables/t2m_29lev.shtml)
+  (30 colours) on levels every 1.5 C from -10 to 35 C: 30 intervals, one
+  colour each. Below -10 C and above 35 C take the first and last colours
+  (the colour bar's arrows). The colour bar labels every other level.
+- Its maps (per-item and composites) draw the 10 m wind vectors exactly as
+  on the surface wind speed maps (see above).
 
 ### Precipitation
 

@@ -285,3 +285,33 @@ def test_small_maps_get_twenty_vectors_across():
     # 50 km spacing instead of 250 km: arrows are 1/5 as long per knot (2 km per knot).
     np.testing.assert_allclose(length, 5.0 * 3600 / 1852 * 10e3 / 5, rtol=0.01)
     plt.close(fig)
+
+
+def test_t2m_maps_with_wind_vectors(tmp_path, monkeypatch, capsys):
+    import json
+
+    from modelatlasify.plotting import maps
+
+    include = ("U10", "V10", "RAINC", "RAINNC", "T2")
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 2), include=include)
+    write_wrfout(run, hourly(T0, 2), domain=2, nx=20, ny=16, dx=4000.0, include=include)
+    saved = []
+    real_draw = maps._draw_map
+    monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (
+        saved.append((str(path), bool(k.get("vectors")))), real_draw(path, *a, **k))[1])
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--variables", "t2m", "--no-validate"]) == 0
+    assert "Also making u10" in capsys.readouterr().err
+
+    item = sorted(run_out(out, run).glob("items/d02-*"))[-1]
+    assert {p.name for p in item.iterdir() if p.suffix in (".tif", ".png")} == {
+        "t2m.tif", "t2m.png", "u10.tif", "v10.tif"}
+    assets = json.loads((item / f"{item.name}.json").read_text())["assets"]
+    assert assets["t2m"]["roles"] == ["data"] and "t2m_map" in assets
+    t2m_maps = [(p, v) for p, v in saved if p.endswith(".png") and "t2m" in p]
+    assert len(t2m_maps) == 2 * 2 + 2  # per-item d01, d02 at 2 times + 2 composites
+    assert all(v for _, v in t2m_maps)  # every t2m map has wind vectors
+    images = run_out(out, run) / "model-images" / "full"
+    assert len(list((images / "t2m").glob("*.png"))) == 2
+    assert "2 m temperature" in (run_out(out, run) / "model-images.html").read_text()

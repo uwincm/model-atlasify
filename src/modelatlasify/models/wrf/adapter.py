@@ -47,6 +47,10 @@ WRF_TIME_FORMAT = "%Y-%m-%d_%H:%M:%S"
 #: edge rows/columns a moving nest just moved into, are set to missing.
 MAX_OLR_ZERO_FRACTION = 0.10
 
+#: T2 that is exactly 0 K at more than this fraction of points is rejected as
+#: zero-filled; fewer zero cells are set to missing.
+MAX_T2_ZERO_FRACTION = 0.01
+
 #: Sea spray product -> WRF output variable and the units it must have. WRF
 #: writes these whether or not spray is on (zeros when off), so whether spray
 #: was on comes from the coupler's uwin.nml (see ``spray_off_reason``).
@@ -143,6 +147,8 @@ class _WRFState:
     olr_missing_reason: str | None = None
     # Why u10/v10 cannot be made (None = the output has U10 and V10).
     uv10_missing_reason: str | None = None
+    # Why t2m cannot be made (None = the output has T2).
+    t2_missing_reason: str | None = None
 
 
 class WRFAdapter(ModelAdapter):
@@ -413,7 +419,9 @@ class WRFAdapter(ModelAdapter):
                                     olr_missing_reason=self._missing_reason(
                                         entries[0][1].path, ("OLR",)),
                                     uv10_missing_reason=self._missing_reason(
-                                        entries[0][1].path, ("U10", "V10"))),
+                                        entries[0][1].path, ("U10", "V10")),
+                                    t2_missing_reason=self._missing_reason(
+                                        entries[0][1].path, ("T2",))),
         )
 
     @staticmethod
@@ -447,7 +455,7 @@ class WRFAdapter(ModelAdapter):
     # ---------------------------------------------------------- variables
     def supported_variables(self) -> list[str]:
         return ["surface_wind_speed", "precipitation", "precipitation_interval",
-                "olr", "olr_precipitation", "u10", "v10", *SPRAY_FIELDS]
+                "olr", "olr_precipitation", "u10", "v10", "t2m", *SPRAY_FIELDS]
 
     def unavailable_variables(self, dataset: ModelDataset) -> dict[str, str]:
         out = {}
@@ -458,6 +466,8 @@ class WRFAdapter(ModelAdapter):
             out["olr"] = out["olr_precipitation"] = dataset.adapter_state.olr_missing_reason
         if dataset.adapter_state.uv10_missing_reason is not None:
             out["u10"] = out["v10"] = dataset.adapter_state.uv10_missing_reason
+        if dataset.adapter_state.t2_missing_reason is not None:
+            out["t2m"] = dataset.adapter_state.t2_missing_reason
         return out
 
     def compute(self, dataset: ModelDataset, variable: str, time_index: int) -> FieldResult | None:
@@ -477,6 +487,9 @@ class WRFAdapter(ModelAdapter):
         if variable in ("u10", "v10"):
             data, prov = self._earth_relative_wind10(dataset, time_index)
             return FieldResult(variable, data[variable], valid, provenance=prov)
+        if variable == "t2m":
+            data, prov = self._t2m(dataset, time_index)
+            return FieldResult(variable, data[::-1].copy(), valid, provenance=prov)
         if variable == "olr":
             data, prov = self._olr(dataset, time_index)
             return FieldResult(variable, data[::-1].copy(), valid, provenance=prov)
@@ -570,6 +583,29 @@ class WRFAdapter(ModelAdapter):
         })
         self._uv_cache = {"key": key, "value": value}
         return value
+
+    def _t2m(self, dataset, t):
+        if not self._has(dataset, t, "T2"):
+            raise VariableUnavailableError(
+                f"Cannot compute t2m for {dataset.dataset_id}: T2 is missing in "
+                f"{dataset.adapter_state.slots[t].path.name}.")
+        units = self._units(dataset, t, "T2")
+        if units != "K":
+            raise VariableUnavailableError(
+                f"T2 has units '{units}', expected 'K'; refusing to guess a conversion.")
+        t2 = self._read_2d(dataset, t, "T2")
+        zero = float(np.mean(t2 == 0.0))  # 0 K is never real: zero-filled input
+        if zero > MAX_T2_ZERO_FRACTION:
+            raise FieldQualityError(
+                f"T2 is exactly 0 K at {100 * zero:.1f}% of grid points; input data is "
+                "probably zero-filled or corrupt")
+        t2[t2 == 0.0] = np.nan
+        return t2 - 273.15, {
+            "source_variables": ["T2"],
+            "method": "T2 (2 m diagnostic) as written by WRF, converted from K to degC "
+                      "(- 273.15)",
+            "height_m": 2,
+        }
 
     def _olr(self, dataset, t):
         if not self._has(dataset, t, "OLR"):
