@@ -484,11 +484,17 @@ in a box around the domain's outer edge plus 1° on every side.
   are missing. `surface_currents` = sqrt(u² + v²). Grids rotated from
   east/north (`pang` ≠ 0) get no current products (with a warning), rather
   than risk a wrong rotation.
-- Ocean maps draw **current** vectors, not wind: twice as dense as the wind
-  vectors (one every 125 km, at least 40 across a map), 125 km per 1 m s-1 at
-  that spacing (so a 1 m s-1 arrow is one spacing long), growing up to
-  2 m s-1. Closer spacing on small maps shortens arrows in proportion, as for
-  the wind. The key is in m/s.
+- Ocean maps draw **current** vectors, not wind, as **curly vectors**: each
+  is a short streamline of the flow through its point (half upstream, half
+  downstream) with an arrowhead at the downstream end, so it shows where the
+  water is going, not just its direction at one spot. They are twice as dense
+  as the wind vectors (one every 125 km, at least 40 across a map). A curve's
+  length on the ground is set by the current speed at its point: 375 km per
+  1 m s-1 at that spacing (a 1 m s-1 curve spans three spacings), growing up
+  to 2 m s-1. Closer spacing on small maps shortens curves in proportion, as
+  for the wind. Each curve follows the finest ocean grid at its point
+  (bilinear between cell centres) and stops at land or the grid's edge. The
+  key, in m/s, is a straight arrow as long as that speed's curve.
 
 ### Sea spray
 

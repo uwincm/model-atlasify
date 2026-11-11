@@ -12,13 +12,14 @@ with warnings.catch_warnings():
 
 from modelatlasify.core.variables import VariableDefinition, VectorStyle, register
 
-#: Surface current vectors: twice as dense as the wind's (one every 125 km, at
-#: least 40 across a map), 125 km per 1 m s-1 at that spacing (so a 1 m s-1
-#: arrow is one spacing long), growing up to 2 m s-1. Typical currents of a
-#: few tenths of a m s-1 give arrows a few tenths of the spacing.
-CURRENT_VECTORS = VectorStyle(spacing_km=125.0, min_across=40, km_per_unit=125.0,
+#: Surface current vectors, drawn as curly vectors (short streamlines): twice
+#: as dense as the wind's (one every 125 km, at least 40 across a map), 375 km
+#: of curve per 1 m s-1 at that spacing (a 1 m s-1 curve is three spacings
+#: long), growing up to 2 m s-1. Typical currents of a few tenths of a m s-1
+#: give curves about one spacing long.
+CURRENT_VECTORS = VectorStyle(spacing_km=125.0, min_across=40, km_per_unit=375.0,
                               max_speed=2.0, units="m/s", units_per_m_s=1.0,
-                              key_speeds=(1.0, 0.5, 0.2, 0.1, 0.05))
+                              key_speeds=(1.0, 0.5, 0.2, 0.1, 0.05), curly=True)
 _CURRENTS = ("surface_u", "surface_v")
 
 SST = register(

@@ -21,6 +21,9 @@ class VectorStyle:
     units: str  # speed units of the key, e.g. "kt"
     units_per_m_s: float  # ``units`` per m s-1
     key_speeds: tuple[float, ...]  # key arrow candidates, largest first
+    # Curly vectors: short streamlines through each point, as long as a
+    # straight arrow would be, instead of straight arrows.
+    curly: bool = False
 
 
 @dataclass(frozen=True)
