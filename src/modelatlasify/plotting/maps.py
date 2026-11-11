@@ -303,7 +303,8 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
     unit of speed (scaled down in proportion when the spacing is closer, so
     arrows keep their size relative to the spacing), up to
     ``style.max_speed``, and point along the flow as it looks in the map's
-    projection."""
+    projection. With ``style.curly`` they are curly vectors instead (see
+    :func:`_draw_curly`)."""
     x0, x1, y0, y1 = view.extent
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
     _, north_c = _ground_axes(view, np.array([cx]), np.array([cy]))
@@ -314,6 +315,9 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
     gx, gy = np.meshgrid(np.arange(x0 + step / 2, x1, step), np.arange(y0 + step / 2, y1, step))
     gx, gy = gx.ravel(), gy.ravel()
     lon, lat = _view_to_lonlat(view, gx, gy)
+    if style.curly:
+        _draw_curly(fig, ax, view, vectors, style, lon, lat, step, m_per_unit, per_m)
+        return
     u = np.full(gx.shape, np.nan)
     v = np.full(gx.shape, np.nan)
     for ue, ve, grid in reversed(vectors):  # finest first
@@ -351,6 +355,164 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
     ax.quiverkey(q, 0.905, 0.095, key * m_per_unit * per_m,
                  f"{key:g} {style.units}\n(max {style.max_speed:g})", coordinates="figure",
                  labelpos="S", fontproperties={"size": 8})
+
+
+#: Integration steps per curly vector (half upstream, half downstream).
+CURLY_STEPS = 24
+
+
+def _draw_curly(fig, ax, view: MapView, vectors: VectorLayers, style: VectorStyle,
+                lon: np.ndarray, lat: np.ndarray, step: float, m_per_unit: float,
+                per_m: float) -> None:
+    """Curly vectors: through each lattice point (``lon``/``lat``), a short
+    streamline of the flow, half upstream and half downstream of the point,
+    with an arrowhead at its downstream end. Its length on the ground is what
+    a straight arrow's would be (``m_per_unit`` metres per speed unit, at the
+    point's speed, up to ``style.max_speed``). Each curve is traced in the
+    finest grid covering its point (bilinear flow), and stops early at land
+    or at that grid's edge."""
+    x0, x1 = view.extent[:2]
+    done = np.zeros(lon.shape, bool)
+    lines, heads = [], []
+    head_len = 0.18 * step  # view units
+    for ue, ve, grid in reversed(vectors):  # finest first
+        todo = ~done & np.isfinite(lon)
+        if not todo.any():
+            break
+        ue, ve = np.asarray(ue, dtype=np.float64), np.asarray(ve, dtype=np.float64)
+        col, row = _lonlat_to_cell(grid, lon[todo], lat[todo])
+        speed = np.hypot(_bilinear(ue, col, row), _bilinear(ve, col, row))
+        ok = np.isfinite(speed) & (speed > 0)
+        done[np.flatnonzero(todo)[ok]] = True
+        if not ok.any():
+            continue
+        col, row, speed = col[ok], row[ok], speed[ok]
+        half = 0.5 * np.minimum(speed * style.units_per_m_s, style.max_speed) * m_per_unit
+        up = _trace(ue, ve, grid, col, row, half, -1.0)
+        down = _trace(ue, ve, grid, col, row, half, +1.0)
+        cols = np.concatenate([up[0][:, ::-1], down[0][:, 1:]], axis=1)
+        rows = np.concatenate([up[1][:, ::-1], down[1][:, 1:]], axis=1)
+        t = grid.transform
+        vx, vy = _to_view(view, grid.crs, (t.c + cols * t.a + rows * t.b).ravel(),
+                          (t.f + cols * t.d + rows * t.e).ravel())
+        for px, py in zip(vx.reshape(cols.shape), vy.reshape(cols.shape)):
+            keep = np.isfinite(px) & np.isfinite(py)
+            px, py = px[keep], py[keep]
+            if px.size < 2:
+                continue
+            lines.append(np.column_stack([px, py]))
+            dx, dy = px[-1] - px[-2], py[-1] - py[-2]
+            seg = math.hypot(dx, dy)
+            if seg == 0:
+                continue
+            hl = min(head_len, 0.5 * float(np.sum(np.hypot(np.diff(px), np.diff(py)))))
+            ux, uy, hw = dx / seg, dy / seg, 0.45 * hl
+            bx, by = px[-1] - hl * ux, py[-1] - hl * uy
+            heads.append([(px[-1], py[-1]), (bx - hw * uy, by + hw * ux),
+                          (bx + hw * uy, by - hw * ux)])
+    if not lines:
+        return
+    from matplotlib.collections import LineCollection, PolyCollection
+    from matplotlib.patches import FancyArrow
+
+    ax.add_collection(LineCollection(lines, colors="black", linewidths=0.7,
+                                     transform=view.projection, zorder=2.5))
+    ax.add_collection(PolyCollection(heads, facecolors="black", edgecolors="none",
+                                     transform=view.projection, zorder=2.5))
+    # Key: a straight arrow as long as the curve of a round speed.
+    ax.apply_aspect()
+    map_width_frac = ax.get_position().width
+    def key_frac(speed):
+        return speed * m_per_unit * per_m / (x1 - x0) * map_width_frac
+    key = next((s for s in style.key_speeds if key_frac(s) <= 0.08), style.key_speeds[-1])
+    kl = key_frac(key)
+    fig.add_artist(FancyArrow(0.905 - kl / 2, 0.11, kl, 0, width=0.0012, head_width=0.008,
+                              head_length=min(0.006, kl / 2), length_includes_head=True,
+                              color="black", transform=fig.transFigure))
+    fig.text(0.905, 0.095, f"{key:g} {style.units} (curve length)\n(max {style.max_speed:g})",
+             ha="center", va="top", fontsize=8)
+
+
+def _lonlat_to_cell(grid: GridDefinition, lon: np.ndarray, lat: np.ndarray
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    """Fractional (col, row) of lon/lat points in ``grid`` (cell corners are
+    integers, so cell (r, c) spans [c, c+1) x [r, r+1))."""
+    x, y = Transformer.from_crs(grid.crs.geodetic_crs, grid.crs, always_xy=True).transform(
+        lon, lat)
+    inv = ~grid.transform
+    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    return inv.a * x + inv.b * y + inv.c, inv.d * x + inv.e * y + inv.f
+
+
+def _bilinear(field: np.ndarray, col: np.ndarray, row: np.ndarray) -> np.ndarray:
+    """``field`` (cell values, north-up) at fractional (col, row), bilinear
+    between cell centres; NaN outside the centres or next to a missing cell."""
+    h, w = field.shape
+    c, r = col - 0.5, row - 0.5
+    c0, r0 = np.floor(c), np.floor(r)
+    out = np.full(np.shape(col), np.nan)
+    ok = np.isfinite(c0) & np.isfinite(r0) & (c0 >= 0) & (c0 < w - 1) & (r0 >= 0) & (r0 < h - 1)
+    c0, r0 = c0[ok].astype(int), r0[ok].astype(int)
+    fc, fr = c[ok] - c0, r[ok] - r0
+    out[ok] = (field[r0, c0] * (1 - fc) * (1 - fr) + field[r0, c0 + 1] * fc * (1 - fr)
+               + field[r0 + 1, c0] * (1 - fc) * fr + field[r0 + 1, c0 + 1] * fc * fr)
+    return out
+
+
+def _ground_metrics(grid: GridDefinition, col: np.ndarray, row: np.ndarray):
+    """At fractional (col, row): ground metres per column step and per row
+    step, and the angle (radians, counter-clockwise) from east to the +col
+    direction. Rows run southward in north-up grids."""
+    t = grid.transform
+    to_ll = Transformer.from_crs(grid.crs, grid.crs.geodetic_crs, always_xy=True)
+    d = 0.01
+    def lonlat(c, r):
+        lo, la = to_ll.transform(t.c + c * t.a + r * t.b, t.f + c * t.d + r * t.e)
+        return np.radians(np.asarray(lo)), np.radians(np.asarray(la))
+    lon0, lat0 = lonlat(col, row)
+    lonc, latc = lonlat(col + d, row)
+    lonr, latr = lonlat(col, row + d)
+    r_earth = 6371e3
+    def east_north(lo, la):
+        dlon = (lo - lon0 + np.pi) % (2 * np.pi) - np.pi
+        return dlon * np.cos(lat0) * r_earth, (la - lat0) * r_earth
+    ec, nc = east_north(lonc, latc)
+    er, nr = east_north(lonr, latr)
+    return np.hypot(ec, nc) / d, np.hypot(er, nr) / d, np.arctan2(nc, ec)
+
+
+def _trace(ue: np.ndarray, ve: np.ndarray, grid: GridDefinition, col: np.ndarray,
+           row: np.ndarray, length_m: np.ndarray, sign: float):
+    """Streamlines from (col, row), downstream (sign +1) or upstream (-1), of
+    ground length ``length_m`` each, by midpoint (RK2) steps along the flow
+    direction. Returns (cols, rows), each (n, CURLY_STEPS // 2 + 1), with NaN
+    after a curve stops (land, grid edge, or no flow)."""
+    n = CURLY_STEPS // 2
+    ds = length_m / n
+    cols = np.full((col.size, n + 1), np.nan)
+    rows = np.full((col.size, n + 1), np.nan)
+    cols[:, 0], rows[:, 0] = col, row
+    c, r = col.copy(), row.copy()
+    alive = np.ones(col.size, bool)
+
+    def rate(c, r):  # (dcol, drow) per ground metre along the flow
+        u, v = _bilinear(ue, c, r), _bilinear(ve, c, r)
+        speed = np.hypot(u, v)
+        m_col, m_row, theta = _ground_metrics(grid, c, r)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ex, ny = u / speed, v / speed
+        along_col = ex * np.cos(theta) + ny * np.sin(theta)  # flow along +col
+        along_up = -ex * np.sin(theta) + ny * np.cos(theta)  # flow along -row (north)
+        return along_col / m_col, -along_up / m_row
+
+    for k in range(1, n + 1):
+        dc1, dr1 = rate(c, r)
+        dc2, dr2 = rate(c + sign * 0.5 * ds * dc1, r + sign * 0.5 * ds * dr1)
+        nc, nr = c + sign * ds * dc2, r + sign * ds * dr2
+        alive &= np.isfinite(nc) & np.isfinite(nr)
+        c, r = np.where(alive, nc, c), np.where(alive, nr, r)
+        cols[alive, k], rows[alive, k] = c[alive], r[alive]
+    return cols, rows
 
 
 def _view_to_lonlat(view: MapView, x: np.ndarray, y: np.ndarray

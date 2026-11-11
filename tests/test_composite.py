@@ -342,3 +342,97 @@ def test_olr_maps_have_no_wind_vectors():
               "spray_latent_heat_flux", "spray_sensible_heat_flux", "significant_wave_height",
               "mean_wave_period", "dominant_wave_period", "surface_wind_speed", "t2m"):
         assert get_variable(v).vectors == ("u10", "v10")
+
+
+def _curly_setup(u, v, width_m):
+    """A Mercator grid (R = 6370 km) from the equator, its full view, and the
+    curly vectors drawn on it with the ocean current style."""
+    import matplotlib.pyplot as plt
+    from pyproj import CRS
+    from rasterio.transform import from_origin
+
+    from modelatlasify.core.model import GridDefinition
+    from modelatlasify.plotting.maps import _draw_vectors, full_view
+    from modelatlasify.variables.ocean import CURRENT_VECTORS
+
+    ny, nx = u.shape
+    crs = CRS.from_proj4("+proj=merc +lat_ts=0 +lon_0=0 +R=6370000 +units=m")
+    dx = width_m / nx
+    grid = GridDefinition(crs=crs, transform=from_origin(0.0, ny * dx, dx, dx), width=nx,
+                          height=ny)
+    view = full_view(grid)
+    fig = plt.figure()
+    ax = fig.add_axes([0, 0, 1, 1], projection=view.projection)
+    ax.set_extent(view.extent, crs=view.projection)
+    _draw_vectors(fig, ax, view, [(u, v, grid)], CURRENT_VECTORS)
+    from matplotlib.collections import LineCollection, PolyCollection
+    lines = [c for c in ax.collections if isinstance(c, LineCollection)]
+    heads = [c for c in ax.collections if isinstance(c, PolyCollection)]
+    return fig, lines, heads
+
+
+def test_curly_vectors_in_uniform_flow_are_straight_and_scaled():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    u = np.zeros((40, 240))
+    u[:, :120] = 0.2  # m/s, east, in the west half
+    u[:, 120:] = 3.0  # above the 2 m/s cap in the east half
+    fig, (lines,), (heads,) = _curly_setup(u, np.zeros_like(u), 6.0e6)  # 6000 km: 125 km steps
+    segs = lines.get_segments()
+    assert len(segs) == len(heads.get_paths()) > 0
+    for s in segs:
+        assert np.allclose(s[:, 1], s[0, 1])  # due east, straight
+        assert np.all(np.diff(s[:, 0]) > 0)  # pointing downstream (east)
+    lat = np.degrees(2 * np.arctan(np.exp(np.array([s[0, 1] for s in segs]) / 6370e3)) - np.pi / 2)
+    ground_km = np.array([s[-1, 0] - s[0, 0] for s in segs]) * np.cos(np.radians(lat)) / 1e3
+    mid = np.array([s[len(s) // 2, 0] for s in segs])
+    west = mid < 3.0e6 - 200e3  # away from the speed jump
+    east = (mid > 3.0e6 + 800e3) & (mid < 6.0e6 - 800e3)  # ...and from the grid's east edge
+    np.testing.assert_allclose(ground_km[west], 0.2 * 375, rtol=0.02)  # 375 km per m/s
+    np.testing.assert_allclose(ground_km[east], 2.0 * 375, rtol=0.02)  # capped at 2 m/s
+    # Centred on the seed (the middle point): equal halves upstream and downstream.
+    seed = mid
+    up = np.array([s[len(s) // 2, 0] - s[0, 0] for s in segs])
+    down = np.array([s[-1, 0] - s[len(s) // 2, 0] for s in segs])
+    np.testing.assert_allclose(up[west], down[west], rtol=1e-6)
+    # Seeds every 125 km on the ground (at the map's centre latitude).
+    row = np.isclose([s[0, 1] for s in segs], segs[0][0, 1])
+    spacing = np.diff(np.sort(seed[row & west]))  # (truncated edge curves lose points)
+    lat_c = np.degrees(2 * np.arctan(np.exp(0.5e6 / 6370e3)) - np.pi / 2)
+    np.testing.assert_allclose(spacing * np.cos(np.radians(lat_c)), 125e3, rtol=1e-3)
+    plt.close(fig)
+
+
+def test_curly_vectors_curve_with_the_flow_and_stop_at_land():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    n, width = 120, 1.2e6  # 10 km cells; 40 curves across: 30 km apart, 90 km per m/s
+    y, x = np.mgrid[n - 1:-1:-1, 0:n] + 0.5 - n / 2  # north-up cell centres, origin centred
+    radius = np.hypot(x, y)
+    u, v = -y / radius, x / radius  # 1 m/s everywhere, counter-clockwise around the centre
+    u[:, :10] = v[:, :10] = np.nan  # land strip on the west edge
+    fig, (lines,), _ = _curly_setup(u, v, width)
+    segs = lines.get_segments()
+    centre = np.array([width / 2, width / 2])
+    mid_r = np.array([np.hypot(*(s[len(s) // 2] - centre)) for s in segs])
+    chord = np.array([np.hypot(*(s[-1] - s[0])) for s in segs])
+    arc = np.array([np.hypot(*np.diff(s, axis=0).T).sum() for s in segs])
+    near = (mid_r > 20e3) & (mid_r < 60e3)  # 90 km curves on 20-60 km circles
+    assert near.any() and np.all(chord[near] < 0.9 * arc[near])  # clearly curved (straight: 1)
+    # Counter-clockwise: the end lies to the left of the start direction.
+    for s in np.array(segs, dtype=object)[near]:
+        d0, d1 = s[1] - s[0], s[-1] - s[0]
+        assert d0[0] * d1[1] - d0[1] * d1[0] > 0
+    xmin = min(s[:, 0].min() for s in segs)
+    assert xmin >= 10 / n * width - 1.0  # no curve enters the land strip
+    plt.close(fig)
+
+
+def test_wind_vectors_stay_straight():
+    from modelatlasify.variables.ocean import CURRENT_VECTORS
+    from modelatlasify.variables.wind import WIND_VECTORS
+
+    assert CURRENT_VECTORS.curly and not WIND_VECTORS.curly
+    assert CURRENT_VECTORS.km_per_unit == 3 * CURRENT_VECTORS.spacing_km  # x3 the arrow scale
