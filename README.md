@@ -46,6 +46,12 @@ line.
   northward components (`u10`, `v10`, GeoTIFFs only). Speed maps show wind
   vectors on the composites and the per-item maps
 - **2 m temperature** (`t2m`), in degC, with 10 m wind vectors on its maps
+- **Pressure levels** (WRF), at 700 and 500 hPa: relative humidity
+  (`rh_700`, %), geopotential height (`geopotential_height_700`, m) and
+  earth-relative wind components (`u_700`, `v_700`, m s-1, GeoTIFFs only).
+  RH maps show height contours and wind vectors; height maps (per-item only)
+  show height shaded with its own contours and wind vectors. See
+  [Pressure levels](#pressure-levels)
 - **Precipitation**, in mm:
   - accumulated since the start of the domain's integration
   - accumulated over each output interval
@@ -129,6 +135,7 @@ atlas/
     │   │   ├── precipitation_interval/
     │   │   ├── olr_precipitation/            # OLR with interval precipitation on top
     │   │   ├── t2m/                          # 2 m temperature with wind vectors
+    │   │   ├── rh_700/, rh_500/              # RH with height contours and wind vectors
     │   │   └── surface_wind_speed/
     │   └── gulf/                             # a --plot-sub-areas area (lon/lat map)
     │       └── precipitation/ ...            #   uwincm.gulf.precipitation.<time>.png
@@ -139,6 +146,10 @@ atlas/
         │   ├── surface_wind_speed.png        # with wind vectors
         │   ├── u10.tif, v10.tif              # earth-relative 10 m wind components
         │   ├── t2m.tif / .png                # 2 m temperature (map with wind vectors)
+        │   ├── rh_700.tif / .png             # 700 hPa RH (map: + height contours, vectors)
+        │   ├── geopotential_height_700.tif / .png  # (map: shaded + contours, vectors)
+        │   ├── u_700.tif, v_700.tif          # earth-relative 700 hPa wind components
+        │   ├── ... the same at 500 hPa
         │   ├── precipitation.tif
         │   └── precipitation.png
         └── d01-20261006T010000Z/
@@ -237,7 +248,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`), or `s3://bucket/prefix` to write to S3 (see [Output to S3](#output-to-s3)). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf`, `dwm` or `hycom` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
-| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `temperature` (= `t2m`, which also makes `u10`/`v10` for its vectors), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `ocean` (= `sst` + `surface_salinity` + `surface_currents` + `surface_u` + `surface_v`; `currents` = the last three), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `temperature` (= `t2m`, which also makes `u10`/`v10` for its vectors), `upper_air` (= RH, geopotential height and `u`/`v` at 700 and 500 hPa; `700hpa` or `500hpa` = one level; `rh` or `geopotential_height` = that field at both levels, plus what its maps need), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `ocean` (= `sst` + `surface_salinity` + `surface_currents` + `surface_u` + `surface_v`; `currents` = the last three), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
 | `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
@@ -409,6 +420,32 @@ in a box around the domain's outer edge plus 1° on every side.
   (the colour bar's arrows). The colour bar labels every other level.
 - Its maps (per-item and composites) draw the 10 m wind vectors exactly as
   on the surface wind speed maps (see above).
+
+### Pressure levels
+
+- WRF's history output has no pressure-level fields, so they are interpolated
+  from the model's mass levels to 700 and 500 hPa, linearly in log pressure
+  (`P + PB`). Where the level is below the lowest model level (below ground,
+  e.g. 700 hPa over high terrain) they are missing. All of them come from one
+  read of `P`, `PB`, `PH`, `PHB`, `T`, `QVAPOR`, `U`, `V` per time; a run
+  without these has none of the products (skipped with a warning when
+  requested).
+- `rh_<level>` = RH with respect to liquid water, as WRF's own `rh`
+  diagnostic (wrf-python, NCL `wrf_rh`): from `QVAPOR`, the pressure and
+  T = (`T` + 300 K)(p / 1000 hPa)^(R/cp), with Bolton's saturation vapour
+  pressure; limited to 0–100 %.
+- `geopotential_height_<level>` = (`PH + PHB`) / 9.81, averaged from the
+  staggered to the mass levels, in m.
+- `u_<level>`, `v_<level>` = `U`, `V` averaged to mass points and rotated to
+  east/north like `u10`/`v10`. GeoTIFFs only.
+- RH maps (per-item and composites) use the `rh` NCL colour table of the UW
+  realtime WRF plots, 5–95 % every 5 %, one colour per interval: greys
+  below 20 %, greens above, and yellow above 95 %. Height is contoured every
+  2 dam (blue, labelled in dam, after 5 passes of a 1-2-1 smoother on the
+  map only), and wind vectors are drawn as on the surface maps (kt, max 70).
+- Height maps (`geopotential_height_<level>.png`, per item only; no
+  composites) shade height every 20 m (2980–3200 m at 700 hPa, 5720–5940 m
+  at 500 hPa) in light yellow-orange, with the same contours and vectors.
 
 ### Precipitation
 
@@ -603,9 +640,7 @@ This is a prototype. It does **not** yet provide:
 - a web UI, HTTP serving, or interactive web maps
 - a database (output is plain files, locally or on S3)
 - broad model support (WRF only; no coupled ocean/wave components yet)
-- complete WRF variable support (only 10 m wind speed, precipitation and sea
-  spray), or
-  vertical levels
+- complete WRF variable support (pressure levels: only 700 and 500 hPa)
 - `MAP_PROJ=6` (lat-lon/rotated) grids or moving nests
 - reprojection to a common CRS (GeoTIFFs stay in the native projection)
 - parallel or production-scale workflow orchestration (processing is

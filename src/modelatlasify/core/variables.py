@@ -27,6 +27,18 @@ class VectorStyle:
 
 
 @dataclass(frozen=True)
+class ContourStyle:
+    """How a variable is drawn when it is another's overlay as contour lines
+    (e.g. geopotential height over relative humidity)."""
+
+    interval: float  # between contour lines, in the variable's units
+    label_scale: float = 1.0  # contour labels show value * label_scale ...
+    label_units: str = ""  # ... in these units (e.g. m -> dam: 0.1, "dam")
+    color: str = "black"
+    smooth_passes: int = 0  # 1-2-1 smoothing passes (each direction), maps only
+
+
+@dataclass(frozen=True)
 class VariableDefinition:
     name: str  # file/asset key, e.g. "surface_wind_speed"
     long_name: str  # human-readable, e.g. "Surface wind speed"
@@ -47,12 +59,17 @@ class VariableDefinition:
     transparent_above: float | None = None
     # Another variable drawn on top of this one on maps (e.g. precipitation over
     # OLR). Maps only: the GeoTIFF holds this variable's own data.
+    # The overlay may be this variable itself (shading plus its own contours).
     overlay: str | None = None
+    # Set: as an overlay, this variable is drawn as contour lines (not shaded).
+    contour: ContourStyle | None = None
     # A map-only product: no data or GeoTIFF of its own; its maps draw this
     # other variable's field, in that variable's style (plus ``overlay``).
     draws: str | None = None
     # False = GeoTIFF only, no maps of its own (e.g. OLR, mapped as olr_precipitation).
     maps: bool = True
+    # False = per-item maps only, no composite maps (model-images) of its own.
+    composite: bool = True
     # (eastward, northward) wind variables drawn as vectors on this variable's
     # maps. A model that does not make them (e.g. DWM) takes them from another
     # model of the same run (WRF) at the same valid time, when there is one.

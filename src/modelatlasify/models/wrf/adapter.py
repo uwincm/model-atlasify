@@ -25,6 +25,9 @@ from modelatlasify.core.model import FieldResult, GridDefinition, ModelAdapter, 
 from modelatlasify.core.namelist import read_namelist
 from modelatlasify.models.wrf.projection import MAP_PROJ_NAMES, wrf_grid
 from modelatlasify.variables.precipitation import NEGATIVE_TOLERANCE_MM, interval_precipitation
+from modelatlasify.variables.upper_air import (PRESSURE_LEVELS_HPA, interp_to_pressure,
+                                               relative_humidity)
+from modelatlasify.variables.upper_air import names as level_names
 from modelatlasify.variables.wind import destagger, earth_relative, wind_speed
 
 log = logging.getLogger(__name__)
@@ -61,6 +64,14 @@ SPRAY_FIELDS = {
 }
 #: The UWIN-CM coupler namelist and its spray switch.
 UWIN_NAMELIST = "uwin.nml"
+
+#: Native 3-D fields the pressure-level products need.
+PRESSURE_LEVEL_SOURCES = ("P", "PB", "PH", "PHB", "T", "QVAPOR", "U", "V")
+#: Pressure-level product -> (level in hPa, quantity).
+PRESSURE_LEVEL_PRODUCTS = {name: (lev, q) for lev in PRESSURE_LEVELS_HPA
+                           for q, name in level_names(lev).items()}
+G = 9.81  # m s-2, as WRF
+RD_CP = 287.0 / 1004.5  # R_d / c_p, as WRF (rcp)
 SPRAY_SWITCH = "sprayMediatedHeatFluxes"
 
 
@@ -149,6 +160,8 @@ class _WRFState:
     uv10_missing_reason: str | None = None
     # Why t2m cannot be made (None = the output has T2).
     t2_missing_reason: str | None = None
+    # Why pressure-level products cannot be made (None = the 3-D fields are there).
+    levels_missing_reason: str | None = None
 
 
 class WRFAdapter(ModelAdapter):
@@ -159,6 +172,7 @@ class WRFAdapter(ModelAdapter):
         self._accum_cache: dict[tuple[str, str, int], tuple[np.ndarray, dict]] = {}
         self._accum_check: dict[tuple[str, str, int], str | None] = {}  # None = passed
         self._uv_cache: dict = {}  # last earth-relative u10/v10 (computed together)
+        self._plev_cache: dict = {}  # last pressure-level products (computed together)
         self.skipped_files: list[tuple[Path, str]] = []
 
     # ------------------------------------------------------------------ I/O
@@ -421,7 +435,9 @@ class WRFAdapter(ModelAdapter):
                                     uv10_missing_reason=self._missing_reason(
                                         entries[0][1].path, ("U10", "V10")),
                                     t2_missing_reason=self._missing_reason(
-                                        entries[0][1].path, ("T2",))),
+                                        entries[0][1].path, ("T2",)),
+                                    levels_missing_reason=self._missing_reason(
+                                        entries[0][1].path, PRESSURE_LEVEL_SOURCES)),
         )
 
     @staticmethod
@@ -455,7 +471,8 @@ class WRFAdapter(ModelAdapter):
     # ---------------------------------------------------------- variables
     def supported_variables(self) -> list[str]:
         return ["surface_wind_speed", "precipitation", "precipitation_interval",
-                "olr", "olr_precipitation", "u10", "v10", "t2m", *SPRAY_FIELDS]
+                "olr", "olr_precipitation", "u10", "v10", "t2m", *PRESSURE_LEVEL_PRODUCTS,
+                *SPRAY_FIELDS]
 
     def unavailable_variables(self, dataset: ModelDataset) -> dict[str, str]:
         out = {}
@@ -468,6 +485,9 @@ class WRFAdapter(ModelAdapter):
             out["u10"] = out["v10"] = dataset.adapter_state.uv10_missing_reason
         if dataset.adapter_state.t2_missing_reason is not None:
             out["t2m"] = dataset.adapter_state.t2_missing_reason
+        if dataset.adapter_state.levels_missing_reason is not None:
+            out.update(dict.fromkeys(PRESSURE_LEVEL_PRODUCTS,
+                                     dataset.adapter_state.levels_missing_reason))
         return out
 
     def compute(self, dataset: ModelDataset, variable: str, time_index: int) -> FieldResult | None:
@@ -493,6 +513,11 @@ class WRFAdapter(ModelAdapter):
         if variable == "olr":
             data, prov = self._olr(dataset, time_index)
             return FieldResult(variable, data[::-1].copy(), valid, provenance=prov)
+        if variable in PRESSURE_LEVEL_PRODUCTS:
+            fields, prov = self._pressure_levels(dataset, time_index)
+            level, _ = PRESSURE_LEVEL_PRODUCTS[variable]
+            return FieldResult(variable, fields[variable], valid,
+                               provenance={**prov, "pressure_hpa": level})
         if variable in SPRAY_FIELDS:
             data, prov = self._spray(dataset, time_index, variable)
             return FieldResult(variable, data[::-1].copy(), valid, provenance=prov)
@@ -582,6 +607,55 @@ class WRFAdapter(ModelAdapter):
             "height_m": 10,
         })
         self._uv_cache = {"key": key, "value": value}
+        return value
+
+    def _pressure_levels(self, dataset, t):
+        """Every pressure-level product at time t (north-up), from one read of
+        the 3-D fields: RH, geopotential height and earth-relative wind,
+        interpolated linearly in log pressure to each level."""
+        key = (dataset.run_id, dataset.dataset_id, t)
+        if self._plev_cache.get("key") == key:
+            return self._plev_cache["value"]
+        missing = [n for n in PRESSURE_LEVEL_SOURCES if not self._has(dataset, t, n)]
+        if missing:
+            raise VariableUnavailableError(
+                f"Cannot compute pressure-level fields for {dataset.dataset_id}: "
+                f"{'/'.join(missing)} missing in {dataset.adapter_state.slots[t].path.name}.")
+        for name, expected in (("P", "Pa"), ("PB", "Pa"), ("T", "K"), ("U", "m s-1"),
+                               ("V", "m s-1")):
+            units = self._units(dataset, t, name)
+            if units.replace(" ", "") != expected.replace(" ", ""):
+                raise VariableUnavailableError(
+                    f"{name} has units '{units}', expected '{expected}'; refusing to guess a "
+                    "conversion.")
+        p = self._read_2d(dataset, t, "P") + self._read_2d(dataset, t, "PB")
+        theta = self._read_2d(dataset, t, "T") + 300.0  # WRF's T is theta - 300 K
+        temp = theta * (p / 1.0e5) ** RD_CP
+        rh = relative_humidity(np.maximum(self._read_2d(dataset, t, "QVAPOR"), 0.0), p, temp)
+        del theta, temp
+        geopotential = self._read_2d(dataset, t, "PH") + self._read_2d(dataset, t, "PHB")
+        height = destagger(geopotential, axis=0) / G  # to mass levels
+        u = destagger(self._read_2d(dataset, t, "U"), axis=2)
+        v = destagger(self._read_2d(dataset, t, "V"), axis=1)
+        grid = dataset.grid_at(t)
+        fields = {}
+        for lev in PRESSURE_LEVELS_HPA:
+            n = level_names(lev)
+            rh_l, z_l, u_l, v_l = (a[::-1] for a in interp_to_pressure(
+                [rh, height, u, v], p, lev * 100.0))
+            fields[n["rh"]], fields[n["height"]] = rh_l.copy(), z_l.copy()
+            fields[n["u"]], fields[n["v"]] = earth_relative(u_l, v_l, grid)
+        value = (fields, {
+            "source_variables": list(PRESSURE_LEVEL_SOURCES),
+            "method": (
+                "interpolated linearly in log pressure (P + PB) from the model's mass levels; "
+                "RH from QVAPOR, P + PB and T = (T + 300 K)(p / 1000 hPa)^(R/cp) with respect "
+                "to liquid water (as WRF's rh diagnostic); geopotential height = "
+                "(PH + PHB) / 9.81 averaged to mass levels; U and V averaged to mass points "
+                "and rotated to east/north with the grid's map projection; missing where the "
+                "level is below the lowest model level"),
+        })
+        self._plev_cache = {"key": key, "value": value}
         return value
 
     def _t2m(self, dataset, t):

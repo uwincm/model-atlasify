@@ -182,7 +182,8 @@ def test_olr_precipitation_maps(tmp_path, capsys):
     item = sorted(run_out(out, run).glob("items/d01-*"))[-1]
     assert {p.name for p in item.iterdir() if p.suffix in (".tif", ".png")} == {
         "olr.tif", "olr_precipitation.png",
-        "precipitation_interval.tif", "precipitation_interval.png"}
+        "precipitation_interval.tif", "precipitation_interval.png",
+        "u10.tif", "v10.tif"}  # for the vectors on the precipitation_interval maps
     with rasterio.open(item / "olr.tif") as src:  # the full range: no 240 W m-2 cutoff
         assert src.read(1).max() > 240.0
     assets = json.loads((item / f"{item.name}.json").read_text())["assets"]

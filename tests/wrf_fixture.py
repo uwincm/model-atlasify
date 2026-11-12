@@ -90,6 +90,7 @@ def write_wrfout(
     prec_acc_dt: float | None = None,
     spray_units: dict[str, str] | None = None,
     olr_units: str = "W m-2",
+    levels: bool = False,
 ) -> list[Path]:
     """Write wrfout_dNN_* files. Returns paths.
 
@@ -108,6 +109,11 @@ def write_wrfout(
 
     OLR (when in ``include``) = 100 + 150 i/nx W m-2; ``olr_units`` overrides its units.
     T2 (when in ``include``) = 263.15 + 50 i/nx K (-10 to 40 C).
+
+    ``levels`` also writes P, PB, PH, PHB, T and QVAPOR (see LEVEL_* below):
+    pressure 900, 600, 400 hPa on the 3 mass levels (650 hPa at the lowest in
+    columns i < 2, where 700 hPa is below ground), heights 1000, 4000, 7000 m
+    plus 10 i m, temperature 280 K, and RH 30 + 40 i/nx % at every level.
 
     ``move`` = (cols east, rows north) per output time makes a moving nest:
     the k-th time is shifted by k * move cells, and the i in the patterns
@@ -132,6 +138,7 @@ def write_wrfout(
             nc.createDimension("west_east_stag", nx + 1)
             nc.createDimension("south_north_stag", ny + 1)
             nc.createDimension("bottom_top", 3)
+            nc.createDimension("bottom_top_stag", 4)
             attrs = dict(
                 TITLE=" OUTPUT FROM WRF V4.5.1 MODEL",
                 SIMULATION_START_DATE=f"{sim_start:%Y-%m-%d_%H:%M:%S}",
@@ -155,6 +162,12 @@ def write_wrfout(
             v_lon = nc.createVariable("XLONG", "f4", ("Time", "south_north", "west_east"))
             v_lat.units, v_lon.units = "degree_north", "degree_east"
             fields = {}
+            if levels:
+                for name, units in LEVEL_UNITS.items():
+                    stag = "bottom_top_stag" if name.startswith("PH") else "bottom_top"
+                    fields[name] = nc.createVariable(
+                        name, "f4", ("Time", stag, "south_north", "west_east"))
+                    fields[name].units = units
             for name in include:
                 dims = {
                     "U": ("Time", "bottom_top", "south_north", "west_east_stag"),
@@ -217,8 +230,31 @@ def write_wrfout(
                     fields["OLR"][n] = 100.0 + 150.0 * ii / nx
                 if "T2" in fields:
                     fields["T2"][n] = 263.15 + 50.0 * ii / nx
+                if levels:
+                    p_pa = np.broadcast_to(np.array(LEVEL_P_HPA)[:, None, None] * 100.0,
+                                           (3, ny, nx)).copy()
+                    p_pa[0][ii < 2] = LEVEL_P0_LOW_HPA * 100.0
+                    fields["PB"][n] = 0.8 * p_pa
+                    fields["P"][n] = 0.2 * p_pa
+                    phi = (np.array(LEVEL_Z_STAG_M)[:, None, None] + 10.0 * ii) * 9.81
+                    fields["PHB"][n] = 0.5 * phi
+                    fields["PH"][n] = 0.5 * phi
+                    theta = LEVEL_T_K * (1.0e5 / p_pa) ** (287.0 / 1004.5)
+                    fields["T"][n] = theta - 300.0
+                    es = 611.2 * np.exp(17.67 * (LEVEL_T_K - 273.15) / (LEVEL_T_K - 29.65))
+                    rh = (30.0 + 40.0 * ii / nx) / 100.0
+                    fields["QVAPOR"][n] = rh * 0.622 * es / (p_pa - 0.378 * es)
         paths.append(path)
     return paths
+
+
+#: The ``levels`` fields of write_wrfout.
+LEVEL_UNITS = {"P": "Pa", "PB": "Pa", "PH": "m2 s-2", "PHB": "m2 s-2", "T": "K",
+               "QVAPOR": "kg kg-1"}
+LEVEL_P_HPA = (900.0, 600.0, 400.0)
+LEVEL_P0_LOW_HPA = 650.0  # lowest-level pressure in columns i < 2
+LEVEL_Z_STAG_M = (0.0, 2000.0, 6000.0, 8000.0)  # mass levels: 1000, 4000, 7000 m
+LEVEL_T_K = 280.0
 
 
 def hourly(start: datetime, n: int, step_hours: float = 1.0) -> list[datetime]:

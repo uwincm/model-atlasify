@@ -218,7 +218,7 @@ def test_variable_aliases():
         resolve_names(["humidity"])
 
 
-SPRAY_INCLUDE = ("U10", "V10", "RAINC", "RAINNC", "OLR", "T2", *SPRAY_FIELDS)
+SPRAY_INCLUDE = ("U10", "V10", "U", "V", "RAINC", "RAINNC", "OLR", "T2", *SPRAY_FIELDS)
 
 
 @pytest.mark.parametrize("variable,scale", [("spray_mass_flux", 1e-5),
@@ -226,7 +226,7 @@ SPRAY_INCLUDE = ("U10", "V10", "RAINC", "RAINNC", "OLR", "T2", *SPRAY_FIELDS)
                                             ("spray_sensible_heat_flux", 0.1)])
 def test_spray_fields_when_spray_is_on(tmp_path, variable, scale):
     run = tmp_path / "r"
-    write_wrfout(run, hourly(T0, 3), include=SPRAY_INCLUDE)
+    write_wrfout(run, hourly(T0, 3), include=SPRAY_INCLUDE, levels=True)
     write_uwin_nml(run, spray=True)
     adapter = WRFAdapter()
     (ds,) = adapter.discover(run)
@@ -241,7 +241,7 @@ def test_spray_fields_when_spray_is_on(tmp_path, variable, scale):
 @pytest.mark.parametrize("spray_nml", [False, None])  # .F., or no uwin.nml at all
 def test_spray_fields_unavailable_when_spray_is_off(tmp_path, spray_nml):
     run = tmp_path / "r"
-    write_wrfout(run, hourly(T0, 2), include=SPRAY_INCLUDE)  # WRF writes them anyway (zeros)
+    write_wrfout(run, hourly(T0, 2), include=SPRAY_INCLUDE, levels=True)  # WRF writes them anyway (zeros)
     if spray_nml is not None:
         write_uwin_nml(run, spray=spray_nml)
     adapter = WRFAdapter()
