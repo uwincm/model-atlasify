@@ -13,9 +13,10 @@ to plot it. STAC is the interoperability layer: anything that reads STAC
 (QGIS, pystac-client, stac-browser, odc-stac, ...) can find and load the
 products.
 
-This repository is an early working version: WRF atmosphere output and DWM
-wave model output (on its own or coupled, e.g. UWIN-CM), run from the command
-line.
+Version 0.2.0 has the basic functionality and the full set of maps: WRF
+atmosphere, DWM wave and HYCOM ocean output (each on its own or coupled, e.g.
+UWIN-CM), run from the command line. See [CHANGELOG.md](CHANGELOG.md) for what
+changed, and [Next steps](#next-steps) for what comes next.
 
 ## Current capabilities
 
@@ -106,7 +107,7 @@ pixi run modelatlasify /data/wrf/run01 --output ./atlas -np 8
 ```
 
 ```text
-ModelAtlasify 0.1.0: all models found -> /home/me/atlas
+ModelAtlasify 0.2.0: all models found -> /home/me/atlas
 Variables: surface_wind_speed, precipitation, precipitation_interval (8 processes)
 Found WRF run 'data/wrf/run01' in /data/wrf/run01:
   d01: 25 file(s), 25 time(s) 2026-10-06 00:00 -> 2026-10-07 00:00 UTC, 1649x699 grid, georeference fit error 2.4 m.
@@ -633,17 +634,26 @@ WRF data is committed to this repository.
 
 ## Limitations
 
-This is a prototype. It does **not** yet provide:
+ModelAtlasify does **not** yet provide:
 
 - daemon/service operation, scheduling, or automatic monitoring of model
   directories
 - a web UI, HTTP serving, or interactive web maps
 - a database (output is plain files, locally or on S3)
-- broad model support (WRF only; no coupled ocean/wave components yet)
-- complete WRF variable support (pressure levels: only 700 and 500 hPa)
-- `MAP_PROJ=6` (lat-lon/rotated) grids or moving nests
+- models other than WRF, DWM and HYCOM
+- more WRF variables (pressure levels: only 700 and 500 hPa)
+- WRF `MAP_PROJ=6` (lat-lon/rotated) grids
 - reprojection to a common CRS (GeoTIFFs stay in the native projection)
-- parallel or production-scale workflow orchestration (processing is
-  sequential; plotting dominates run time on large domains)
-- incremental updates (each invocation rebuilds the catalog for the given
-  inputs)
+- production-scale workflow orchestration (valid times run in parallel with
+  `-np`, but plotting dominates run time on large domains)
+- incremental updates (each invocation reprocesses every valid time of the
+  given inputs)
+
+## Next steps
+
+With the products in place, the next versions focus on:
+
+- **Efficiency**: shorter run times, especially plotting on large domains,
+  and incremental updates that process only new output.
+- **User-friendliness**: simpler options and defaults, configuration files,
+  and better documentation.
