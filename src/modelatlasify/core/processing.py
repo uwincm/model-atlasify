@@ -330,7 +330,7 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
     for bi, valid in enumerate(base.valid_times):
         for vname in variables:
             var = get_variable(vname)
-            if not var.maps:
+            if not (var.maps and var.composite):
                 continue
             source = var.draws or vname  # a map-only product draws another's GeoTIFF
             if (base.dataset_id, valid, source) not in products:
@@ -618,27 +618,32 @@ def _datasets_to_keep(datasets: list[ModelDataset], primary: list[str],
 
 
 def _dependencies(var: VariableDefinition) -> list[str]:
-    """Variables whose fields ``var``'s maps draw (draws, overlay, vectors)."""
-    return [d for d in (var.draws, var.overlay, *(var.vectors or ())) if d]
+    """Other variables whose fields ``var``'s maps draw (draws, overlay,
+    vectors); not ``var`` itself (e.g. height over its own contours)."""
+    return [d for d in (var.draws, var.overlay, *(var.vectors or ())) if d and d != var.name]
 
 
 def _with_dependencies(variables: list[str], report: Callable[[str], None],
                        makeable: set[str] | None = None) -> list[str]:
     """``variables`` plus the variables their maps need (olr_precipitation
     draws olr and overlays precipitation_interval; surface maps draw u10/v10
-    vectors), each placed just before the first variable that uses it so it
-    is computed first at every time. Dependencies no model found can make
-    (``makeable``; e.g. u10/v10 in a DWM-only run) are left out."""
+    vectors), each placed just before the first variable that uses it (and
+    after its own dependencies) so it is computed first at every time.
+    Dependencies no model found can make (``makeable``; e.g. u10/v10 in a
+    DWM-only run) are left out."""
     out: list[str] = []
-    for v in variables:
-        var = get_variable(v)
-        for dep in _dependencies(var):
+
+    def add(v: str) -> None:  # v after its own dependencies, recursively
+        for dep in _dependencies(get_variable(v)):
             if dep not in out and (makeable is None or dep in makeable):
                 if dep not in variables:
                     report(f"Also making {dep}: the {v} maps use it.")
-                out.append(dep)
+                add(dep)
         if v not in out:
             out.append(v)
+
+    for v in variables:
+        add(v)
     return out
 
 
@@ -705,6 +710,14 @@ def _titles(ds: ModelDataset, fld: FieldResult, long_name: str, units: str,
           and overlay.variable == "precipitation_interval" and overlay.start_time):
         over_units = get_variable(overlay.variable).units
         title = f"OLR ({units}) and " + _interval_precip_title(overlay, over_units)
+    elif overlay is not None and get_variable(overlay.variable).contour is not None:
+        over = get_variable(overlay.variable)
+        c = over.contour
+        every = f"every {c.interval * c.label_scale:g} {c.label_units or over.units}"
+        if overlay.variable == fld.variable:  # its own contours
+            title = f"{long_name} ({units}), contours {every}"
+        else:
+            title = f"{long_name} ({units}) and {over.long_name} ({every})"
     elif fld.variable == "precipitation" and ds.reference_time:
         title = f"{long_name} since {ds.reference_time:%Y-%m-%d %H:%M} UTC ({units})"
     else:

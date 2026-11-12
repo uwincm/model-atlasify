@@ -32,7 +32,8 @@ from pyproj import CRS, Transformer  # noqa: E402
 from modelatlasify.core import storage  # noqa: E402
 from modelatlasify.core.areas import FULL_AREA, SubArea  # noqa: E402
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
-from modelatlasify.core.variables import VariableDefinition, VectorStyle  # noqa: E402
+from modelatlasify.core.variables import (ContourStyle, VariableDefinition,  # noqa: E402
+                                          VectorStyle)
 from modelatlasify.variables.wind import WIND_VECTORS  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -219,7 +220,9 @@ def _draw_map(
 
     img = _draw_layers(ax, view, layers, variable, zorder0=1.0)
     over_img = None
-    if overlay is not None:
+    if overlay is not None and overlay[0].contour is not None:
+        _draw_contours(ax, view, overlay[1], overlay[0].contour)
+    elif overlay is not None:
         over_img = _draw_layers(ax, view, overlay[1], overlay[0], zorder0=1.5)
     _add_geography(ax, extent_m=view.extent_m)
     for grids, style in ((outlines, "-"), (dashed_outlines, (0, (6, 4)))):
@@ -291,6 +294,60 @@ def _draw_layers(ax, view: MapView, layers: Layers, variable: VariableDefinition
     if img is None:  # nothing in view; keep the colour bar
         img = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     return img
+
+
+def _draw_contours(ax, view: MapView, layers: Layers, style: ContourStyle) -> None:
+    """Labelled contour lines of one field's layers (coarsest first; each is
+    cut off where a finer layer is drawn), every ``style.interval``."""
+    drawn = [(np.asarray(d, dtype=np.float64), g) for d, g in layers if d is not None]
+    finite = [d[np.isfinite(d)] for d, _ in drawn]
+    finite = np.concatenate(finite) if finite else np.array([])
+    if finite.size == 0:
+        return
+    levels = np.arange(math.floor(finite.min() / style.interval),
+                       math.ceil(finite.max() / style.interval) + 1) * style.interval
+    if levels.size < 2:
+        return
+    for k, (data, grid) in enumerate(drawn):
+        data = _smooth121(data, style.smooth_passes)
+        for _, finer in drawn[k + 1:]:
+            data = np.where(_inside(grid, finer), np.nan, data)
+        rows, cols = np.mgrid[0:grid.height + 1, 0:grid.width + 1]
+        window = _crop_window(*_to_view(view, grid.crs, *_apply(grid, cols, rows)), view)
+        if window is None:
+            continue
+        r0, r1, c0, c1 = window
+        rows, cols = np.mgrid[r0:r1, c0:c1] + 0.5  # cell centres
+        xs, ys = _to_view(view, grid.crs, *_apply(grid, cols, rows))
+        sub = np.ma.masked_invalid(data[r0:r1, c0:c1])
+        if sub.count() < 4:
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # "no contour levels were found"
+            cs = ax.contour(xs, ys, sub, levels=levels, colors=style.color, linewidths=0.9,
+                            transform=view.projection, zorder=2.2 + 0.01 * k)
+            ax.clabel(cs, inline=True, fontsize=7, colors=style.color,
+                      fmt=lambda v: f"{v * style.label_scale:g}")
+
+
+def _smooth121(data: np.ndarray, passes: int) -> np.ndarray:
+    """``passes`` passes of a 1-2-1 filter along each axis (as NCL's
+    wrf_smooth_2d), ignoring missing cells; missing cells stay missing."""
+    if passes <= 0:
+        return data
+    valid = np.isfinite(data)
+    out = np.where(valid, data, 0.0)
+    w = valid.astype(np.float64)
+    for _ in range(passes):
+        for axis in (0, 1):
+            def f(a):
+                a = np.moveaxis(a, axis, 0)
+                p = np.concatenate([a[:1], a, a[-1:]])
+                return np.moveaxis(p[:-2] + 2 * p[1:-1] + p[2:], 0, axis)
+            num, den = f(out * w), f(w)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                out = np.where(den > 0, num / den, 0.0)
+    return np.where(valid, out, np.nan)
 
 
 def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
