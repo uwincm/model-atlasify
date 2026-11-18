@@ -58,7 +58,8 @@ changed, and [Next steps](#next-steps) for what comes next.
   - accumulated over each output interval
 - **Outgoing longwave radiation** (WRF, when the output has `OLR`), in W m-2:
   GeoTIFFs of the full field (`olr`), and maps of OLR in reversed greyscale
-  with the interval precipitation drawn on top (`olr_precipitation`)
+  with the interval precipitation drawn on top (`olr_precipitation`), over
+  satellite imagery (Esri World Imagery by default; see `--basemap`)
 - **Sea spray** (WRF in UWIN-CM runs with spray on): spray mass flux
   (kg m-2 s-1, logarithmic colour scale), spray-mediated latent and sensible
   heat flux (W m-2)
@@ -242,6 +243,7 @@ modelatlasify /data/wrf/run01 -o s3://my-bucket/atlas -np 8
 modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables wind,precipitation,waves]
               [--domains d01,d02] [--cut-dirs N] [-np N] [--no-plots] [--no-validate] [-v]
               [--plot-sub-areas NAME,LON1,LON2,LAT1,LAT2[,NAME,...]] [--no-full-plots]
+              [--basemap {esri_world_imagery,google_hybrid,none}]
 ```
 
 | option | meaning |
@@ -256,6 +258,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | `--no-plots` | Skip PNG maps, including the composite maps (much faster for large domains). |
 | `--plot-sub-areas` | Extra composite maps of lon/lat boxes, as groups of five values: `NAME,LON1,LON2,LAT1,LAT2`. Names may use letters, digits, `_` and `-`; `full` is reserved. Longitudes may be in -180..180 or 0..360. The box runs east from LON1 to LON2, so LON2 < LON1 crosses the antimeridian. Ignored with `--no-plots`. |
 | `--no-full-plots` | Skip the whole-domain composite maps (`model-images/full/`). The per-item maps in `items/` and any `--plot-sub-areas` maps are still made. |
+| `--basemap` | Satellite-imagery background of the OLR/precipitation maps (the other maps keep the plain land/sea background). `esri_world_imagery` (default): Esri World Imagery, imagery only. `google_hybrid`: Google Maps imagery with roads, borders and place names (the "Google Hybrid" basemap in QGIS; note Google's terms do not cover using these tiles outside its Maps APIs). `none`: the plain background with Natural Earth coastlines. Tiles are downloaded at the zoom matching the map's resolution and cached under cartopy's data directory (`basemap_tiles/`); if they cannot be downloaded, maps fall back to the plain background with a warning. The imagery credit is printed in the map's lower-right corner. |
 | `--no-validate` | Skip STAC JSON-schema validation, which downloads schemas. Asset links are always checked. |
 
 Exit status: `0` on success, `1` on errors (no usable data, a missing input
@@ -487,7 +490,9 @@ in a box around the domain's outer edge plus 1° on every side.
   `visual` asset; no GeoTIFF). It draws `olr` in reversed greyscale spread
   over 80–300 W m-2, so cold cloud tops are white and 240 W m-2 is dark grey
   rather than black. OLR above 240 W m-2 (mostly clear sky) is drawn
-  transparent, so the map background and coastlines show through. The `precipitation_interval` product of the same
+  transparent, so the satellite imagery underneath shows through (see
+  `--basemap`; it has its own coastlines and borders, so Natural Earth's are
+  not drawn). The `precipitation_interval` product of the same
   time and domain is drawn on top, in its usual colours. Each field has its own
   colour bar.
 - At the first output time there is no interval precipitation, so the map

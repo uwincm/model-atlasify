@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Maps
+- OLR/precipitation maps are drawn over satellite imagery (Esri World
+  Imagery) instead of the pale land/sea background, so the grey OLR shading
+  stands out. `--basemap google_hybrid` uses Google's hybrid imagery (with
+  roads and place names) instead, and `--basemap none` the old background.
+  Tiles are cached; without network access the maps fall back to the plain
+  background.
+
 ## 0.2.0 (2026-11-12)
 
 Basic functionality and the full set of maps are in place. Next versions

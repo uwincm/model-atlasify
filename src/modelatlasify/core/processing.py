@@ -54,6 +54,9 @@ class PipelineOptions:
     cut_dirs: int = 0  # leading input-path directories dropped from the output folder
     sub_areas: list[SubArea] = field(default_factory=list)  # zoomed composites, in lon/lat
     full_plots: bool = True  # whole-domain composites (model-images/full/)
+    #: Tile background for maps that have one (e.g. OLR): a key of
+    #: plotting.basemaps.BASEMAPS, or "none"; None = each variable's default.
+    basemap: str | None = None
 
 
 @dataclass
@@ -167,14 +170,17 @@ _worker: dict = {}
 
 
 def _init_worker(models: list[str], datasets: dict[tuple[str, str], ModelDataset], output: Path,
-                 variables: list[str], plots: bool, log_levels: dict[str, int]) -> None:
+                 variables: list[str], plots: bool, log_levels: dict[str, int],
+                 basemap: str | None = None) -> None:
     for name, level in log_levels.items():
         if name == "":
             logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
         logging.getLogger(name).setLevel(level)
     plot_field = plot_composite = None
     if plots:  # heavy imports; only when needed
-        from modelatlasify.plotting.maps import plot_composite, plot_field
+        from modelatlasify.plotting.maps import plot_composite, plot_field, set_basemap
+
+        set_basemap(basemap)
     _worker.clear()
     adapters = {a.name: a for a in map(get_adapter, models)}
     _worker.update(adapters=adapters, datasets=datasets,
@@ -489,7 +495,7 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
             adapter.close()  # workers open their own file handles
 
         init_args = (names, all_datasets, options.output, variables, options.plots,
-                     _log_levels())
+                     _log_levels(), options.basemap)
         n_tasks = sum(len(d.valid_times) for d in all_datasets.values())
         processes = min(options.processes, n_tasks)
         if processes > 1:

@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors
 
 from modelatlasify.core.variables import VariableDefinition, register
+from modelatlasify.plotting.basemaps import DEFAULT_BASEMAP
 
 
 def get_colormap_precip():
@@ -120,6 +121,7 @@ OLR = register(
         vmax=OLR_CLEAR,
         extend="min",
         transparent_above=OLR_CLEAR,  # on maps only
+        basemap=DEFAULT_BASEMAP,  # clouds read better over imagery than over pale land
         maps=False,
     )
 )

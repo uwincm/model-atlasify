@@ -17,6 +17,7 @@ from modelatlasify.core.areas import parse_sub_areas
 from modelatlasify.core.errors import ModelAtlasifyError
 from modelatlasify.core.variables import all_variables, resolve_names
 from modelatlasify.models import AVAILABLE_MODELS
+from modelatlasify.plotting.basemaps import BASEMAPS, DEFAULT_BASEMAP, NO_BASEMAP
 
 
 def _status(msg: str) -> None:
@@ -71,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "Repeat the 5 values for more areas. The box runs east from LON1 "
                         "to LON2 (-180..180 or 0..360), so LON2 < LON1 crosses the "
                         "antimeridian")
+    p.add_argument("--basemap", default=None, choices=[*BASEMAPS, NO_BASEMAP],
+                   help=f"satellite-imagery background of the OLR/precipitation maps "
+                        f"(default: {DEFAULT_BASEMAP}); google_hybrid adds roads and place "
+                        f"names; {NO_BASEMAP} = the plain land/sea background. Tiles are "
+                        f"downloaded once and cached")
     p.add_argument("--no-validate", dest="validate", action="store_false",
                    help="skip STAC JSON-schema validation (asset links are always checked)")
     p.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
@@ -135,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     options = PipelineOptions(
         inputs=args.inputs, output=output, model=args.model, variables=variables,
         plots=args.plots, domains=domains, processes=args.processes, sub_areas=sub_areas,
-        full_plots=args.full_plots, cut_dirs=args.cut_dirs,
+        full_plots=args.full_plots, cut_dirs=args.cut_dirs, basemap=args.basemap,
     )
     models = "all models found" if args.model == "auto" else args.model.upper()
     _status(f"ModelAtlasify {__version__}: {models} -> {output}")

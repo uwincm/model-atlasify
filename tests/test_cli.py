@@ -298,3 +298,32 @@ def test_cli_only_spray_requested_and_no_run_has_spray(tmp_path, capsys):
     assert rc == 1
     assert "skipping spray_mass_flux" in err
     assert "None of the inputs provides the requested variables" in err
+
+
+def test_cli_basemap_choice(tmp_path, monkeypatch):
+    """--basemap picks the tile background of maps that have one (OLR); 'none'
+    keeps the plain background without touching the network."""
+    import modelatlasify.plotting.maps as maps
+
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 2), include=("U10", "V10", "RAINC", "RAINNC", "OLR"))
+
+    drawn = []
+    monkeypatch.setattr(maps, "_add_basemap",
+                        lambda fig, ax, view, name, dpi: drawn.append(name) or False)
+    try:
+        for choice, expected in ((None, {"esri_world_imagery"}), ("google_hybrid", {"google_hybrid"}),
+                                 ("none", set())):
+            drawn.clear()
+            args = [str(run), "-o", str(tmp_path / f"a_{choice}"), "--variables", "olr",
+                    "--no-validate"] + (["--basemap", choice] if choice else [])
+            assert main(args) == 0
+            assert set(drawn) == expected
+    finally:
+        maps.set_basemap(None)
+
+
+def test_cli_rejects_unknown_basemap(wrf_run, tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        main([str(wrf_run), "-o", str(tmp_path / "a"), "--basemap", "bing"])
+    assert exc.value.code == 2

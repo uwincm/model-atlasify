@@ -76,6 +76,10 @@ class VariableDefinition:
     vectors: tuple[str, str] | None = None
     # How those vectors are drawn (None = wind style, see variables.wind).
     vector_style: VectorStyle | None = None
+    # Web-map tiles drawn under this variable's maps in place of the plain
+    # land/sea background (a key of plotting.basemaps.BASEMAPS; --basemap
+    # picks another, or none, for every such variable).
+    basemap: str | None = None
     # A spatially constant field (e.g. wind identically 0) almost always means
     # zero-filled/corrupt input. False for fields that are legitimately
     # constant sometimes (precipitation is all 0 at initialization).
