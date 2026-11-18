@@ -34,6 +34,7 @@ from modelatlasify.core.areas import FULL_AREA, SubArea  # noqa: E402
 from modelatlasify.core.model import FieldResult, GridDefinition  # noqa: E402
 from modelatlasify.core.variables import (ContourStyle, VariableDefinition,  # noqa: E402
                                           VectorStyle)
+from modelatlasify.plotting.basemaps import BASEMAPS, NO_BASEMAP  # noqa: E402
 from modelatlasify.variables.wind import WIND_VECTORS  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -224,7 +225,9 @@ def _draw_map(
         _draw_contours(ax, view, overlay[1], overlay[0].contour)
     elif overlay is not None:
         over_img = _draw_layers(ax, view, overlay[1], overlay[0], zorder0=1.5)
-    _add_geography(ax, extent_m=view.extent_m)
+    basemap = _basemap_override if variable.basemap and _basemap_override else variable.basemap
+    if not (basemap and basemap != NO_BASEMAP and _add_basemap(fig, ax, view, basemap, dpi)):
+        _add_geography(ax, extent_m=view.extent_m)  # the basemap has its own coasts/borders
     for grids, style in ((outlines, "-"), (dashed_outlines, (0, (6, 4)))):
         for grid in grids:
             bx, by = _outline_in_view(view, grid)
@@ -786,3 +789,134 @@ def _add_geography(ax, extent_m: float) -> None:
         return
     for feature, style in features:
         ax.add_feature(feature, **style)
+
+
+# ---------------------------------------------------------------------------
+# Web-map tile backgrounds (VariableDefinition.basemap)
+# ---------------------------------------------------------------------------
+
+#: Set by set_basemap: a BASEMAPS name or NO_BASEMAP in place of every
+#: variable's own basemap; None = each variable's own.
+_basemap_override: str | None = None
+_TILE_TIMEOUT_S = 20
+#: Fetched backgrounds, per process: (name, view, zoom) -> (image, extent, origin).
+_basemap_images: dict[tuple, tuple] = {}
+_basemap_warning_shown = False
+
+
+def set_basemap(name: str | None) -> None:
+    """Draw ``name`` (a BASEMAPS key, or NO_BASEMAP for the plain background)
+    under every map that has a basemap; None = each variable's own."""
+    global _basemap_override
+    if name is not None and name != NO_BASEMAP and name not in BASEMAPS:
+        raise ValueError(f"Unknown basemap '{name}'; choose from {', '.join(BASEMAPS)} "
+                         f"or {NO_BASEMAP}.")
+    _basemap_override = name
+
+
+def _tile_class():
+    from cartopy.io.img_tiles import GoogleTiles
+
+    class _Tiles(GoogleTiles):
+        """XYZ tiles kept as the server's bytes in a cache directory.
+
+        Unlike cartopy's own cache, a tile that fails to download raises
+        (and is left out of the map) instead of being replaced by a blank tile
+        that is then cached for good, and tiles are written atomically so
+        parallel workers can share the cache."""
+
+        def __init__(self, url: str, cache_dir: Path):
+            super().__init__(url=url, desired_tile_form="RGB")
+            self._dir = cache_dir
+
+        def get_image(self, tile):
+            from urllib.request import Request, urlopen
+
+            from PIL import Image
+
+            x, y, z = tile
+            cached = self._dir / str(z) / f"{x}_{y}.img"
+            if cached.exists():
+                data = cached.read_bytes()
+            else:
+                req = Request(self._image_url(tile), headers={"User-Agent": self.user_agent})
+                with urlopen(req, timeout=_TILE_TIMEOUT_S) as fh:  # raises OSError on failure
+                    data = fh.read()
+                cached.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cached.with_suffix(f".{id(data)}.part")
+                tmp.write_bytes(data)
+                tmp.replace(cached)
+            img = Image.open(io.BytesIO(data)).convert(self.desired_tile_form)
+            return img, self.tileextent(tile), "lower"
+
+    return _Tiles
+
+
+def _basemap_cache_dir(name: str) -> Path:
+    import cartopy
+
+    return Path(cartopy.config["data_dir"]) / "basemap_tiles" / name
+
+
+def _basemap_zoom(merc_width_m: float, pixels_across: float) -> int:
+    """Tile zoom whose 256-pixel tiles match the map's pixel size."""
+    world = 2.0 * math.pi * 6378137.0  # Web Mercator width of the world, m
+    z = math.ceil(math.log2(world * pixels_across / 256.0 / max(merc_width_m, 1.0)))
+    return int(min(max(z, 0), 18))
+
+
+def _add_basemap(fig, ax, view: MapView, name: str, dpi: int) -> bool:
+    """Draw ``BASEMAPS[name]`` tiles under everything; False if none could be fetched."""
+    global _basemap_warning_shown
+    import shapely.geometry as sgeom
+
+    url, attribution = BASEMAPS[name]
+    tiles = _tile_class()(url, _basemap_cache_dir(name))
+    x0, x1, y0, y1 = view.extent
+    domain = tiles.crs.project_geometry(sgeom.box(x0, y0, x1, y1), view.projection)
+    if domain.is_empty:
+        return False
+    bx0, _, bx1, _ = domain.bounds
+    pixels_across = ax.get_position().width * fig.get_figwidth() * dpi
+    z = _basemap_zoom(bx1 - bx0, pixels_across)
+    key = (name, view.extent, view.projection.proj4_init, z)
+    if key not in _basemap_images:
+        try:
+            _basemap_images[key] = tiles.image_for_domain(domain, z)
+        except Exception as exc:  # noqa: BLE001 - offline / blocked: plain background
+            if not _basemap_warning_shown:
+                log.warning("Could not fetch %s basemap tiles (%s); using the plain "
+                            "background.", name, exc)
+                _basemap_warning_shown = True
+            return False
+    rgb = _warp_to_view(*_basemap_images[key], tiles.crs, view, pixels_across)
+    ax.imshow(rgb, extent=view.extent, origin="lower", transform=view.projection, zorder=0,
+              interpolation="nearest")
+    ax.text(0.995, 0.005, attribution, transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=6, color="white", zorder=5)
+    return True
+
+
+def _warp_to_view(img: np.ndarray, extent, origin: str, src: ccrs.Projection, view: MapView,
+                  pixels_across: float) -> np.ndarray:
+    """``img`` (in ``src`` coords over ``extent``) resampled, nearest pixel, onto
+    a grid of the view at about the map's pixel size; RGBA, transparent
+    outside the image."""
+    x0, x1, y0, y1 = view.extent
+    nx = int(round(pixels_across))
+    ny = max(int(round(nx * (y1 - y0) / (x1 - x0))), 1)
+    xs = x0 + (np.arange(nx) + 0.5) * (x1 - x0) / nx
+    ys = y0 + (np.arange(ny) + 0.5) * (y1 - y0) / ny
+    X, Y = np.meshgrid(xs, ys)
+    pts = src.transform_points(view.projection, X, Y)
+    h, w = img.shape[:2]
+    ex0, ex1, ey0, ey1 = extent
+    col = np.floor((pts[..., 0] - ex0) / (ex1 - ex0) * w)
+    row = np.floor((pts[..., 1] - ey0) / (ey1 - ey0) * h)
+    if origin == "upper":
+        row = h - 1 - row
+    ok = np.isfinite(col) & np.isfinite(row) & (col >= 0) & (col < w) & (row >= 0) & (row < h)
+    out = np.zeros((ny, nx, 4), dtype=np.uint8)
+    out[ok, :3] = img[row[ok].astype(int), col[ok].astype(int), :3]
+    out[ok, 3] = 255
+    return out
