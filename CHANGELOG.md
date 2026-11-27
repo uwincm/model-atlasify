@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Maps
+- Significant wave height maps draw the dominant wave direction as white
+  arrows, like the dominant wave period maps.
 - 2 m temperature maps adapt their colour range to each run: the -10 to
   35 C range (every 1.5 C) shifts in 5 C steps to leave the fewest d01 grid
   points outside it at the run's first output time. All the run's `t2m` maps
