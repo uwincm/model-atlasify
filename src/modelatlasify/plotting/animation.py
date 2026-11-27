@@ -1,7 +1,8 @@
 """HTML pages for browsing a run's composite maps.
 
 ``model-images/<area>/<variable>.html`` sits next to ``<variable>/`` and plays
-its PNGs in time order as a looping animation. ``model-images.html``, next to
+its maps (AVIF, or PNG from older versions) in time order as a looping
+animation. ``model-images.html``, next to
 ``model-images/``, is a table of the latest map of every variable (rows) and
 plot area (columns), each linking to its animation. The pages are
 self-contained (inline CSS and JavaScript, images referenced by relative
@@ -21,7 +22,22 @@ from modelatlasify.core.areas import FULL_AREA
 from modelatlasify.core.variables import all_variables, get_variable
 
 #: The valid time in a composite map's file name (see composite_path).
-_TIME = re.compile(r"\.(\d{8}T\d{6}Z)\.png$")
+_TIME = re.compile(r"\.(\d{8}T\d{6}Z)\.(avif|png)$")
+#: Composite map formats, preferred first: AVIF now, PNG from older versions.
+_FORMATS = (".avif", ".png")
+
+
+def _frames(var_dir: Path) -> list[Path]:
+    """The composite maps in ``var_dir``, in time order: one per valid time,
+    the AVIF one where an older run of the same output also left a PNG."""
+    best: dict[str, Path] = {}
+    for p in var_dir.iterdir():
+        if p.suffix not in _FORMATS:
+            continue
+        key = p.name[: -len(p.suffix)]
+        if key not in best or _FORMATS.index(p.suffix) < _FORMATS.index(best[key].suffix):
+            best[key] = p
+    return [best[k] for k in sorted(best)]  # time stamps sort them
 
 
 def _label(name: str) -> str:
@@ -34,12 +50,12 @@ def _label(name: str) -> str:
 def write_animation(var_dir: Path) -> Path | None:
     """Write the animation page for the composite maps in ``var_dir``.
 
-    Frames are every PNG in the directory, so maps left by earlier runs into
-    the same output are included. Returns the page, or None if there are no
+    Frames are every map in the directory (see :func:`_frames`), so maps left
+    by earlier runs into the same output are included. Returns the page, or None if there are no
     frames.
     """
     storage.refresh(var_dir)  # S3: worker processes wrote the frames
-    frames = sorted(var_dir.glob("*.png"), key=lambda p: p.name)  # time stamps sort them
+    frames = _frames(var_dir)
     if not frames:
         return None
     long_name = _long_name(var_dir.name)
@@ -76,8 +92,7 @@ def write_summary(images_dir: Path) -> Path | None:
         if not area_dir.is_dir():
             continue
         for var_dir in area_dir.iterdir():
-            frames = (sorted(var_dir.glob("*.png"), key=lambda p: p.name)
-                      if var_dir.is_dir() else [])
+            frames = _frames(var_dir) if var_dir.is_dir() else []
             if frames:
                 cells[(area_dir.name, var_dir.name)] = frames[-1]
     if not cells:

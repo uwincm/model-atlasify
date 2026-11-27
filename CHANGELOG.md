@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Maps
+- Per-item maps are 500 px wide 8-bit palette PNG previews (were 1210 px
+  RGBA PNGs): about a sixth of the size. They use a compact layout (same
+  fonts on a half-width figure, fewer colour bar labels, a coarser arrow
+  lattice); long titles shrink to fit on every map.
+- Composite maps (`model-images/`) are AVIF (quality 75) instead of PNG:
+  about a third of the size, visually the same. The animation and summary
+  pages use the AVIF map of a time, or a PNG left by an older version where
+  there is none. Per-item maps stay PNG. New dependency:
+  `pillow-avif-plugin` (AVIF support for Pillow builds without it).
 - Significant wave height maps draw the dominant wave direction as white
   arrows, like the dominant wave period maps.
 - 2 m temperature maps adapt their colour range to each run: the -10 to
@@ -24,6 +33,9 @@
   direction as white same-length arrows, between the 10 m wind arrows.
 
 ### Products
+- GeoTIFFs are LERC-compressed with a maximum error per variable (e.g.
+  0.1 degC for t2m, 1 % for RH, 0.01 mm for precipitation; tag `max_error`):
+  3-6x smaller. `spray_mass_flux` stays lossless.
 - Dominant and mean wave direction (`dominant_wave_direction`, alias `dwd`;
   `mean_wave_direction`, alias `mwd`) from DWM `dwd`/`mwd`: GeoTIFFs in
   degrees clockwise from north that the waves come from (CF convention).

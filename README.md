@@ -77,8 +77,10 @@ changed, and [Next steps](#next-steps) for what comes next.
   (`surface_currents`, m s-1) maps with surface current vectors; GeoTIFFs of
   those plus the eastward/northward currents (`surface_u`, `surface_v`).
 - **GeoTIFF** output (COG, float32, NaN nodata, CRS + affine transform, units and
-  provenance tags)
-- **PNG maps** in the native projection
+  provenance tags), LERC-compressed with a stated maximum error per variable
+  (see [GeoTIFF compression](#geotiff-compression))
+- **Maps** in the native projection: 500 px palette-PNG previews per item,
+  1210 px AVIF composites
 - **STAC catalog generation** (Catalog → Collection per run → Item per domain
   and valid time), validated against the STAC JSON schemas
 - **Output to S3**: `-o s3://bucket/prefix` writes everything straight to the
@@ -138,14 +140,14 @@ atlas/
     │   ├── full/                             # plot area: the whole outermost domain
     │   │   ├── precipitation.html            # animation of precipitation/ (open in a browser)
     │   │   ├── precipitation/
-    │   │   │   └── uwincm.full.precipitation.20261006T010000Z.png
+    │   │   │   └── uwincm.full.precipitation.20261006T010000Z.avif
     │   │   ├── precipitation_interval/
     │   │   ├── olr_precipitation/            # OLR with interval precipitation on top
     │   │   ├── t2m/                          # 2 m temperature with wind vectors
     │   │   ├── rh_700/, rh_500/              # RH with height contours and wind vectors
     │   │   └── surface_wind_speed/
     │   └── gulf/                             # a --plot-sub-areas area (lon/lat map)
-    │       └── precipitation/ ...            #   uwincm.gulf.precipitation.<time>.png
+    │       └── precipitation/ ...            #   uwincm.gulf.precipitation.<time>.avif
     └── items/
         ├── d01-20261006T000000Z/
         │   ├── d01-20261006T000000Z.json     # STAC Item: domain d01 @ valid time
@@ -174,6 +176,18 @@ nested domains (d02, d03, ...) drawn on top at their own resolution and outlined
 in black. A nest is overlaid only when its product covers the same period as
 d01's (e.g. not when it started accumulating precipitation later). Otherwise
 only its outline is drawn.
+
+Composite maps are AVIF images (quality 75), about a third of the size of the
+same map as a PNG and visually the same; every current browser shows them. An
+output folder that already has PNG composites from an older version keeps
+them: the animation and summary pages use the AVIF map of a time where there
+is one and the PNG otherwise. Delete the old PNGs to reclaim the space.
+
+The per-item maps in `items/` are previews: 500 px wide, 8-bit palette PNGs
+(256 colours), typically 35-90 KB. They are drawn on a figure half as wide as
+the composites with the same font sizes, so the text stays readable; long
+titles shrink to fit, the colour bar labels fewer levels, and the wind arrows
+and wave direction markers sit on a lattice twice as coarse.
 
 Next to each variable's folder, `<variable>.html` (e.g.
 `model-images/full/surface_wind_speed.html`) plays that folder's maps as a
@@ -235,7 +249,7 @@ modelatlasify /data/wrf/run01 -o s3://my-bucket/atlas -np 8
   deletes a small probe object under the prefix. If there are no credentials,
   if they may not write there (or have expired), or if the bucket does not
   exist, it stops with a message saying how to authenticate.
-- **Objects get a Content-Type** (`image/png`, `text/html`, `application/json`,
+- **Objects get a Content-Type** (`image/png`, `image/avif`, `text/html`, `application/json`,
   `image/tiff; application=geotiff; profile=cloud-optimized`), so pages and
   maps display in a browser if the bucket or a CDN serves them. ModelAtlasify
   does not change bucket policies or object ACLs.
@@ -346,6 +360,37 @@ Everything after the adapter works only with model-agnostic types: a
 - STAC `bbox`/`geometry` are traced along the grid's outer cell edges. Domains
   that cross the antimeridian get a MultiPolygon and a bbox with west > east, as
   RFC 7946 requires.
+
+### GeoTIFF compression
+
+Float model output barely compresses losslessly (its last bits are noise), so
+GeoTIFFs use LERC compression (`LERC_ZSTD`) with a maximum error per variable:
+every stored value is within that amount of the model's, missing values stay
+missing, and a field that is never negative (e.g. precipitation) keeps its
+exact zeros. This makes the files 3-6x smaller. The bound is written to the
+GeoTIFF band tag `max_error`. Reading them needs GDAL 2.4 or later (rasterio,
+QGIS and GDAL-based tools all do).
+
+| variables | max error |
+|---|---|
+| `t2m` | 0.1 degC |
+| `sst` | 0.05 degC |
+| `surface_wind_speed`, `u10`, `v10`, `u_<level>`, `v_<level>` | 0.1 m s-1 |
+| `rh_<level>` | 1 % |
+| `geopotential_height_<level>` | 1 m |
+| `precipitation`, `precipitation_interval` | 0.01 mm |
+| `olr` | 1 W m-2 |
+| `significant_wave_height` | 0.05 m |
+| `mean_wave_period`, `dominant_wave_period` | 0.1 s |
+| `mean_wave_direction`, `dominant_wave_direction` | 1 degree |
+| `surface_salinity` | 0.02 psu |
+| `surface_currents`, `surface_u`, `surface_v` | 0.01 m s-1 |
+| `spray_latent_heat_flux`, `spray_sensible_heat_flux` | 0.001, 0.0001 W m-2 |
+| `spray_mass_flux` | none: lossless (DEFLATE), as it spans 1e-7 to 1e-2 |
+
+Each bound is well below the variable's colour-level spacing and any
+transparency threshold, since the composite maps are drawn from the GeoTIFFs.
+The per-item maps and STAC statistics use the exact model values.
 
 ### DWM grids
 
@@ -640,7 +685,7 @@ non-finite values become NaN, which is the GeoTIFF nodata value
 - **Assets**:
   - GeoTIFFs (role `data`, COG media type), with raster-extension bands (data
     type, nodata, unit, statistics) and provenance
-  - PNG maps (roles `visual`, `overview`)
+  - PNG preview maps, 500 px wide (roles `visual`, `overview`)
 
 ## Tests
 

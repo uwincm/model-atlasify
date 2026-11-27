@@ -51,6 +51,7 @@ SIGNIFICANT_WAVE_HEIGHT = register(
         name="significant_wave_height",
         long_name="Significant wave height",
         units="m",
+        max_error=0.05,  # m
         standard_name="sea_surface_wave_significant_height",
         description=(
             "Significant wave height (4 times the square root of the wave energy "
@@ -70,6 +71,7 @@ MEAN_WAVE_PERIOD = register(
         name="mean_wave_period",
         long_name="Mean wave period",
         units="s",
+        max_error=0.1,  # s
         standard_name="sea_surface_wave_mean_period",
         description="Mean wave period of the wave spectrum, instantaneous at the valid time. "
                     "Missing over land.",
@@ -88,6 +90,7 @@ DOMINANT_WAVE_PERIOD = register(
         name="dominant_wave_period",
         long_name="Dominant wave period",
         units="s",
+        max_error=0.1,  # s
         standard_name="sea_surface_wave_period_at_variance_spectral_density_maximum",
         description="Period of the most energetic (peak) part of the wave spectrum, "
                     "instantaneous at the valid time. Missing over land.",
@@ -106,6 +109,7 @@ DOMINANT_WAVE_DIRECTION = register(
         name="dominant_wave_direction",
         long_name="Dominant wave direction",
         units="degree",
+        max_error=1.0,  # degree
         standard_name="sea_surface_wave_from_direction_at_variance_spectral_density_maximum",
         description="Direction the most energetic (peak) part of the wave spectrum comes "
                     "from, in degrees clockwise from true north (0 = from the north, 90 = from "
@@ -125,6 +129,7 @@ MEAN_WAVE_DIRECTION = register(
         name="mean_wave_direction",
         long_name="Mean wave direction",
         units="degree",
+        max_error=1.0,  # degree
         standard_name="sea_surface_wave_from_direction",
         description="Mean direction the wave spectrum comes from, in degrees clockwise from "
                     "true north (0 = from the north, 90 = from the east), instantaneous at the "

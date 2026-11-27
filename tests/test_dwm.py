@@ -89,7 +89,7 @@ def test_waves_only_run(tmp_path):
         "dominant_wave_period", "mean_wave_period", "significant_wave_height"]
     assert sorted(p.name for p in full.glob("*.html")) == [
         "dominant_wave_period.html", "mean_wave_period.html", "significant_wave_height.html"]
-    assert len(list(full.rglob("*.png"))) == 6
+    assert len(list(full.rglob("*.avif"))) == 6
     collection = json.loads((run_dir / "collection.json").read_text())
     assert collection["title"] == "DWM run waverun"
 

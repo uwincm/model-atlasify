@@ -35,6 +35,7 @@ T2M = register(
         name="t2m",
         long_name="2 m temperature",
         units="degC",
+        max_error=0.1,  # degC
         standard_name="air_temperature",
         description=(
             "Air temperature at 2 m above the surface, instantaneous at the valid time. "

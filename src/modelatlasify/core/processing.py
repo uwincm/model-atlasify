@@ -292,8 +292,9 @@ def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
 # ------------------------------------------------------ composite maps
 def composite_path(run_dir: Path, plot_area: str, variable: str, prefix: str,
                    valid: datetime) -> Path:
-    """``<run>/model-images/<area>/<variable>/<prefix>.<area>.<variable>.<time>.png``"""
-    name = f"{prefix}.{plot_area}.{variable}.{valid:%Y%m%dT%H%M%SZ}.png"
+    """``<run>/model-images/<area>/<variable>/<prefix>.<area>.<variable>.<time>.avif``
+    (AVIF: about a third of the size of a PNG of the same map)."""
+    name = f"{prefix}.{plot_area}.{variable}.{valid:%Y%m%dT%H%M%SZ}.avif"
     return run_dir / "model-images" / plot_area / variable / name
 
 

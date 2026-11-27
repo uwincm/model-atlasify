@@ -129,7 +129,7 @@ def test_pressure_level_maps(tmp_path, monkeypatch):
     assets = json.loads((item / f"{item.name}.json").read_text())["assets"]
     assert assets["u_700"]["roles"] == ["data"] and "u_700_map" not in assets
 
-    pngs = [(p, v) for p, v in drawn if p.endswith(".png")]
+    pngs = [(p, v) for p, v in drawn if p.endswith((".png", ".avif"))]
     # per item: d01, d02 x 2 times x 4 maps; composites: rh_700, rh_500 x 2 times
     assert len(pngs) == 2 * 2 * 4 + 2 * 2
     assert all(v for _, v in pngs)  # wind vectors on every map

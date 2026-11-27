@@ -63,8 +63,10 @@ def test_geotiff_georeferencing_and_metadata(wrf_run, tmp_path):
         assert src.units[0] == "mm"
         assert src.tags(1)["standard_name"] == "precipitation_amount"
         assert src.tags(1)["valid_time"] == "2026-10-06T02:00:00Z"
+        assert src.tags(1)["max_error"] == "0.01"
         data = src.read(1)
-        np.testing.assert_allclose(data, fld.data.astype("f4"))
+        np.testing.assert_allclose(data, fld.data.astype("f4"), rtol=0,
+                                   atol=var.max_error * 1.00001)  # + float32 rounding
 
         # The centre of pixel (row, col) must land on WRF's XLAT/XLONG for that
         # mass point (row 0 of the GeoTIFF is the northernmost WRF row).
@@ -75,6 +77,49 @@ def test_geotiff_georeferencing_and_metadata(wrf_run, tmp_path):
             assert lon == pytest.approx(ds.grid.lon[row, col], abs=1e-4)
             assert lat == pytest.approx(ds.grid.lat[row, col], abs=1e-4)
     assert info.statistics["maximum"] == pytest.approx(float(np.nanmax(fld.data)), rel=1e-6)
+
+
+@pytest.mark.parametrize("max_error", [None, 0.1, 1.0])
+def test_geotiff_keeps_values_within_max_error(tmp_path, wrf_run, max_error):
+    import dataclasses
+
+    from modelatlasify.core.model import FieldResult
+
+    (ds,) = WRFAdapter().discover(wrf_run)
+    rng = np.random.default_rng(0)
+    # Noisy (compresses badly) and never negative, like precipitation: LERC
+    # stores values relative to each block's minimum, so zeros stay exactly
+    # zero when nothing in the block is below zero.
+    data = 10.0 * np.abs(rng.standard_normal(ds.grid.shape))
+    data[:3, :] = np.nan  # missing stays missing
+    data[3:6, :] = 0.0  # exact zeros stay zero
+    fld = FieldResult("t2m", data, T0)
+    var = dataclasses.replace(get_variable("t2m"), max_error=max_error)
+    write_geotiff(tmp_path / "t.tif", fld, ds.grid, var)
+    with rasterio.open(tmp_path / "t.tif") as src:
+        out = src.read(1).astype(np.float64)
+        assert src.compression.name == ("deflate" if max_error is None else "lerc_zstd")
+        assert ("max_error" in src.tags(1)) == (max_error is not None)
+    assert np.array_equal(np.isnan(out), np.isnan(data))
+    assert (out[3:6] == 0.0).all()
+    err = np.nanmax(np.abs(out - data.astype("f4")))
+    assert err == 0.0 if max_error is None else err <= max_error * 1.00001  # + float32 rounding
+
+
+def test_every_geotiff_variable_has_a_deliberate_max_error():
+    from modelatlasify.core.variables import all_variables
+
+    for v in all_variables().values():
+        if v.draws is not None:  # map-only product: no GeoTIFF of its own
+            continue
+        if v.name == "spray_mass_flux":  # log scale over 1e-7..1e-2: stays lossless
+            assert v.max_error is None
+            continue
+        assert v.max_error is not None and v.max_error > 0, v.name
+        if v.levels:  # well below the colour-level spacing ...
+            assert v.max_error <= 0.2 * min(np.diff(v.levels)), v.name
+        if v.transparent_below:  # ... and any transparency threshold
+            assert v.max_error <= 0.1 * v.transparent_below, v.name
 
 
 def test_footprint_simple(wrf_run):

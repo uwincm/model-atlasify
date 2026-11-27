@@ -154,7 +154,7 @@ def test_coupled_run_with_wrf_and_ocean(tmp_path, monkeypatch):
     wind_maps = [(v, u) for p, v, u in saved if "surface_wind_speed" in p]
     assert wind_maps and all(v and u is None for v, u in wind_maps)  # wind style (default)
     images = run_dir / "model-images" / "full"
-    assert len(list((images / "sst").glob("*.png"))) == 2
+    assert len(list((images / "sst").glob("*.avif"))) == 2
     collection = json.loads((run_dir / "collection.json").read_text())
     assert {d["model"] for d in collection["modelatlasify:domains"]} == {"WRF", "HYCOM"}
 
