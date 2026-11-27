@@ -35,6 +35,7 @@ SPRAY_LATENT_HEAT_FLUX = register(
         name="spray_latent_heat_flux",
         long_name="Spray-mediated latent heat flux",
         units="W m-2",
+        max_error=0.001,  # W m-2; a tenth of the 0.01 W m-2 threshold
         description=(
             "Latent heat flux carried by sea spray (upward positive), instantaneous "
             "at the valid time."
@@ -54,6 +55,7 @@ SPRAY_SENSIBLE_HEAT_FLUX = register(
         name="spray_sensible_heat_flux",
         long_name="Spray-mediated sensible heat flux",
         units="W m-2",
+        max_error=0.0001,  # W m-2; a tenth of the 0.001 W m-2 threshold
         description=(
             "Sensible heat flux carried by sea spray (upward positive), instantaneous "
             "at the valid time."

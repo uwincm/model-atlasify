@@ -14,18 +14,19 @@ def test_composite_maps_with_nest(tmp_path):
     assert main([str(run), "-o", str(out), "--no-validate"]) == 0
 
     images = run_out(out, run) / "model-images" / "full"
-    pngs = {p.relative_to(images).as_posix() for p in images.rglob("*.png")}
-    assert "precipitation/uwincm.full.precipitation.20261006T010000Z.png" in pngs
+    maps = {p.relative_to(images).as_posix() for p in images.rglob("*.avif")}
+    assert "precipitation/uwincm.full.precipitation.20261006T010000Z.avif" in maps
+    assert not list(images.rglob("*.png"))  # composites are AVIF
     d01_tifs = [p for p in run_out(out, run).glob("items/d01-*/*.tif")
                 if p.stem not in ("u10", "v10")]  # GeoTIFF only, no maps
-    assert len(pngs) == len(d01_tifs) == 3 + 3 + 2
-    for p in pngs:
+    assert len(maps) == len(d01_tifs) == 3 + 3 + 2
+    for p in maps:
         var, name = p.split("/")
         assert name.startswith(f"uwincm.full.{var}.")
     for var_dir in (d for d in images.iterdir() if d.is_dir()):
         frames = _animation_frames(images / f"{var_dir.name}.html")
         assert [f["src"] for f in frames] == sorted(
-            f"{var_dir.name}/{p.name}" for p in var_dir.glob("*.png"))
+            f"{var_dir.name}/{p.name}" for p in var_dir.glob("*.avif"))
         assert all((images / f["src"]).is_file() for f in frames)
     frames = _animation_frames(images / "precipitation.html")
     assert [f["label"] for f in frames] == ["2026-10-06 00:00 UTC", "2026-10-06 01:00 UTC",
@@ -56,6 +57,17 @@ def test_animation_page(tmp_path):
     assert [f["label"] for f in _animation_frames(page)] == ["2026-10-06 00:00 UTC",
                                                              "2026-10-06 01:00 UTC"]
     assert "<title>Surface wind speed — full — run</title>" in page.read_text(encoding="utf-8")
+    # AVIF maps (this version) and PNGs left by older versions: one frame per
+    # time, the AVIF one where both exist.
+    (var_dir / "uwincm.full.surface_wind_speed.20261006T010000Z.avif").write_bytes(b"")
+    (var_dir / "uwincm.full.surface_wind_speed.20261006T020000Z.avif").write_bytes(b"")
+    (var_dir / "notes.txt").write_bytes(b"")
+    write_animation(var_dir)
+    assert [f["src"].split("/")[1] for f in _animation_frames(page)] == [
+        "uwincm.full.surface_wind_speed.20261006T000000Z.png",
+        "uwincm.full.surface_wind_speed.20261006T010000Z.avif",
+        "uwincm.full.surface_wind_speed.20261006T020000Z.avif"]
+    assert _animation_frames(page)[2]["label"] == "2026-10-06 02:00 UTC"
 
 
 def test_mercator_nest_is_placed_without_resampling(tmp_path):
@@ -78,10 +90,10 @@ def test_sub_area_maps(tmp_path, capsys):
     assert main([str(run), "-o", str(out), "--no-validate", "--variables", "wind",
                  "--plot-sub-areas=zoom,-101,-99,39.5,40.5,away,10,20,40,50"]) == 0
     images = run_out(out, run) / "model-images"
-    zoom = sorted(p.name for p in images.glob("zoom/surface_wind_speed/*.png"))
-    assert zoom == ["uwincm.zoom.surface_wind_speed.20261006T000000Z.png",
-                    "uwincm.zoom.surface_wind_speed.20261006T010000Z.png"]
-    assert len(list(images.glob("full/*/*.png"))) == 2
+    zoom = sorted(p.name for p in images.glob("zoom/surface_wind_speed/*.avif"))
+    assert zoom == ["uwincm.zoom.surface_wind_speed.20261006T000000Z.avif",
+                    "uwincm.zoom.surface_wind_speed.20261006T010000Z.avif"]
+    assert len(list(images.glob("full/*/*.avif"))) == 2
     assert (images / "zoom" / "surface_wind_speed.html").is_file()
     assert not (images / "away").exists()
     assert not (images / "away.html").exists()
@@ -92,7 +104,7 @@ def test_sub_area_maps(tmp_path, capsys):
     assert text.index('<th scope="col">full</th>') < text.index('<th scope="col">zoom</th>')
     assert ('<a href="model-images/zoom/surface_wind_speed.html"' in text
             and 'src="model-images/zoom/surface_wind_speed/'
-                'uwincm.zoom.surface_wind_speed.20261006T010000Z.png"' in text)  # latest frame
+                'uwincm.zoom.surface_wind_speed.20261006T010000Z.avif"' in text)  # latest frame
     for ref in _summary_links(text):
         assert (images.parent / ref).is_file(), ref
 
@@ -162,7 +174,7 @@ def test_no_full_plots_keeps_sub_areas_and_item_maps(tmp_path):
                  "--no-full-plots", "--plot-sub-areas=zoom,-101,-99,39.5,40.5"]) == 0
     images = run_out(out, run) / "model-images"
     assert not (images / "full").exists()
-    assert len(list(images.glob("zoom/surface_wind_speed/*.png"))) == 2
+    assert len(list(images.glob("zoom/surface_wind_speed/*.avif"))) == 2
     assert len(list(run_out(out, run).glob("items/*/surface_wind_speed.png"))) == 2
 
 
@@ -192,7 +204,7 @@ def test_olr_precipitation_maps(tmp_path, capsys):
     assert "olr_map" not in assets and "olr_precipitation" not in assets
 
     images = run_out(out, run) / "model-images" / "full"
-    olr = sorted(p.name for p in (images / "olr_precipitation").glob("*.png"))
+    olr = sorted(p.name for p in (images / "olr_precipitation").glob("*.avif"))
     assert len(olr) == 3  # also at the first time, without precipitation on top
     assert (images / "olr_precipitation.html").is_file()
     assert not (images / "olr").exists()
@@ -209,9 +221,9 @@ def test_wind_vectors_on_every_domain_and_composites(tmp_path, monkeypatch):
     write_wrfout(run, hourly(T0, 2), domain=2, nx=20, ny=16, dx=4000.0)
     calls = []
     real = maps._draw_vectors
-    monkeypatch.setattr(maps, "_draw_vectors", lambda fig, ax, view, vectors, *a: (
+    monkeypatch.setattr(maps, "_draw_vectors", lambda fig, ax, view, vectors, *a, **k: (
         calls.append((ax.figure, [g.width for _, _, g in vectors])),
-        real(fig, ax, view, vectors, *a)))
+        real(fig, ax, view, vectors, *a, **k)))
     saved = []
     real_draw = maps._draw_map
     monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (
@@ -311,11 +323,11 @@ def test_t2m_maps_with_wind_vectors(tmp_path, monkeypatch, capsys):
         "t2m.tif", "t2m.png", "u10.tif", "v10.tif"}
     assets = json.loads((item / f"{item.name}.json").read_text())["assets"]
     assert assets["t2m"]["roles"] == ["data"] and "t2m_map" in assets
-    t2m_maps = [(p, v) for p, v in saved if p.endswith(".png") and "t2m" in p]
+    t2m_maps = [(p, v) for p, v in saved if p.endswith((".png", ".avif")) and "t2m" in p]
     assert len(t2m_maps) == 2 * 2 + 2  # per-item d01, d02 at 2 times + 2 composites
     assert all(v for _, v in t2m_maps)  # every t2m map has wind vectors
     images = run_out(out, run) / "model-images" / "full"
-    assert len(list((images / "t2m").glob("*.png"))) == 2
+    assert len(list((images / "t2m").glob("*.avif"))) == 2
     assert "2 m temperature" in (run_out(out, run) / "model-images.html").read_text()
 
 
@@ -437,3 +449,75 @@ def test_wind_vectors_stay_straight():
 
     assert CURRENT_VECTORS.curly and not WIND_VECTORS.curly
     assert CURRENT_VECTORS.km_per_unit == 3 * CURRENT_VECTORS.spacing_km  # x3 the arrow scale
+
+
+def test_composite_avif_matches_the_png_rendering(tmp_path):
+    """The AVIF composite is the same image savefig writes as PNG (same size,
+    colours close: AVIF is lossy)."""
+    import io
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from PIL import Image, features
+
+    from modelatlasify.plotting.maps import _encode
+
+    if not features.check("avif"):
+        import pillow_avif  # noqa: F401
+
+    def fig():
+        f = plt.figure(figsize=(4.0, 3.0))
+        ax = f.add_axes([0.1, 0.1, 0.8, 0.8])
+        ax.imshow(np.linspace(0, 1, 400).reshape(20, 20), cmap="viridis")
+        f.text(0.5, 0.95, "title", ha="center")
+        return f
+
+    f = fig()
+    png = Image.open(io.BytesIO(_encode(f, ".png", 110))).convert("RGB")
+    plt.close(f)
+    f = fig()
+    data = _encode(f, ".avif", 110)
+    plt.close(f)
+    assert data[4:12] == b"ftypavif"  # an AVIF file
+    avif = Image.open(io.BytesIO(data)).convert("RGB")
+    assert avif.size == png.size == (440, 330)
+    diff = np.abs(np.asarray(avif, dtype=float) - np.asarray(png, dtype=float))
+    assert diff.mean() < 3.0
+    with pytest.raises(ValueError, match="not '.jpg'"):
+        _encode(fig(), ".jpg", 110)
+
+
+def test_item_maps_are_small_palette_pngs_and_composites_full_size_avif(tmp_path):
+    from PIL import Image, features
+
+    if not features.check("avif"):
+        import pillow_avif  # noqa: F401
+
+    run = tmp_path / "run01"
+    write_wrfout(run, hourly(T0, 1))
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--no-validate", "--variables", "wind"]) == 0
+    (item,) = run_out(out, run).glob("items/d01-*")
+    with Image.open(item / "surface_wind_speed.png") as im:
+        assert im.width == 500 and im.mode == "P"  # 8-bit palette
+    (comp,) = run_out(out, run).glob("model-images/full/surface_wind_speed/*.avif")
+    with Image.open(comp) as im:
+        assert im.width == 1210
+
+
+def test_colour_bar_labels_are_thinned_to_fit():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from modelatlasify.core.variables import get_variable
+    from modelatlasify.plotting.maps import _colorbar, _norm_and_cmap
+
+    var = get_variable("t2m")  # 31 levels
+    norm, cmap = _norm_and_cmap(var, np.array([0.0]))
+    mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    for max_ticks, step in ((20, 2), (9, 4), (31, 1)):
+        fig = plt.figure()
+        _colorbar(fig, [0.1, 0.1, 0.8, 0.05], mappable, var, max_ticks)
+        ticks = list(fig.axes[-1].get_xticks())
+        assert ticks == list(var.levels[::step]) and len(ticks) <= max_ticks
+        plt.close(fig)

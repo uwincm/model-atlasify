@@ -47,6 +47,11 @@ class VariableDefinition:
     units: str  # UDUNITS-style, e.g. "m s-1"
     description: str
     standard_name: str | None = None  # CF standard name, if one applies
+    # GeoTIFFs keep every value within this of the model's (absolute, in
+    # ``units``; LERC compression), which makes them several times smaller.
+    # None = lossless. Keep it well below the colour-level spacing and any
+    # transparency threshold: composites are drawn from the GeoTIFFs.
+    max_error: float | None = None
     cell_methods: str | None = None  # CF cell_methods, e.g. "time: sum"
     # Plot defaults.
     cmap: str = "viridis"

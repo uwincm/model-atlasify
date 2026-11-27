@@ -118,9 +118,10 @@ def test_cli_parallel_matches_serial(wrf_run, tmp_path, capsys):
     assert main([str(wrf_run), "-o", str(parallel), "-np", "2", "--no-validate"]) == 0
     assert "(2 processes)" in capsys.readouterr().err
 
-    files = {p.relative_to(serial) for p in serial.rglob("*") if p.suffix in (".tif", ".png")}
+    kinds = (".tif", ".png", ".avif")
+    files = {p.relative_to(serial) for p in serial.rglob("*") if p.suffix in kinds}
     assert files and files == {p.relative_to(parallel) for p in parallel.rglob("*")
-                               if p.suffix in (".tif", ".png")}
+                               if p.suffix in kinds}
     for rel in (f for f in files if f.suffix == ".tif"):
         with rasterio.open(serial / rel) as a, rasterio.open(parallel / rel) as b:
             np.testing.assert_array_equal(a.read(1), b.read(1))
@@ -263,7 +264,7 @@ def test_cli_spray_run_makes_spray_products(tmp_path, capsys):
     tifs = {p.name for p in run_out(out, run).glob("items/*/*.tif")}
     assert tifs == {"surface_wind_speed.tif", "u10.tif", "v10.tif"} | SPRAY_TIFS
     for var in ("spray_mass_flux", "spray_latent_heat_flux", "spray_sensible_heat_flux"):
-        assert list((run_out(out, run) / "model-images" / "full" / var).glob("*.png"))
+        assert list((run_out(out, run) / "model-images" / "full" / var).glob("*.avif"))
 
 
 @pytest.mark.parametrize("spray", [False, None])

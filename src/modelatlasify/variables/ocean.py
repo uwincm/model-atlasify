@@ -27,6 +27,7 @@ SST = register(
         name="sst",
         long_name="Sea surface temperature",
         units="degC",
+        max_error=0.05,  # degC
         standard_name="sea_surface_temperature",
         description=(
             "Temperature of the ocean model's top layer, instantaneous at the valid time. "
@@ -46,6 +47,7 @@ SURFACE_SALINITY = register(
         name="surface_salinity",
         long_name="Sea surface salinity",
         units="psu",
+        max_error=0.02,  # psu
         standard_name="sea_surface_salinity",
         description=(
             "Salinity of the ocean model's top layer (practical salinity), instantaneous "
@@ -66,6 +68,7 @@ SURFACE_CURRENTS = register(
         name="surface_currents",
         long_name="Surface current speed",
         units="m s-1",
+        max_error=0.01,  # m s-1
         standard_name="sea_water_speed",
         description=(
             "Speed of the total (baroclinic + barotropic) current in the ocean model's top "
@@ -87,6 +90,7 @@ SURFACE_U = register(
         name="surface_u",
         long_name="Eastward surface current",
         units="m s-1",
+        max_error=0.01,  # m s-1
         standard_name="eastward_sea_water_velocity",
         description=(
             "Eastward (zonal) component of the total current in the ocean model's top "
@@ -107,6 +111,7 @@ SURFACE_V = register(
         name="surface_v",
         long_name="Northward surface current",
         units="m s-1",
+        max_error=0.01,  # m s-1
         standard_name="northward_sea_water_velocity",
         description=(
             "Northward (meridional) component of the total current in the ocean model's "

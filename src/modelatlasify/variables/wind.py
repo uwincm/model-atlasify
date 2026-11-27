@@ -21,6 +21,7 @@ SURFACE_WIND_SPEED = register(
         name="surface_wind_speed",
         long_name="Surface wind speed",
         units="m s-1",
+        max_error=0.1,  # m s-1
         standard_name="wind_speed",
         description=(
             "Near-surface (10 m) wind speed, sqrt(u^2 + v^2), instantaneous at the "
@@ -40,6 +41,7 @@ U10 = register(
         name="u10",
         long_name="Eastward 10 m wind",
         units="m s-1",
+        max_error=0.1,  # m s-1
         standard_name="eastward_wind",
         description=(
             "Eastward (earth-relative) component of the near-surface (10 m) wind, "
@@ -59,6 +61,7 @@ V10 = register(
         name="v10",
         long_name="Northward 10 m wind",
         units="m s-1",
+        max_error=0.1,  # m s-1
         standard_name="northward_wind",
         description=(
             "Northward (earth-relative) component of the near-surface (10 m) wind, "

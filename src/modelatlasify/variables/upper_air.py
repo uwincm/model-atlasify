@@ -63,6 +63,7 @@ for _lev in PRESSURE_LEVELS_HPA:
         name=_n["rh"],
         long_name=f"{_lev} hPa relative humidity",
         units="%",
+        max_error=1.0,  # %
         standard_name="relative_humidity",
         description=(
             f"Relative humidity (with respect to liquid water) at {_lev} hPa, interpolated "
@@ -82,6 +83,7 @@ for _lev in PRESSURE_LEVELS_HPA:
         name=_n["height"],
         long_name=f"{_lev} hPa geopotential height",
         units="m",
+        max_error=1.0,  # m
         standard_name="geopotential_height",
         description=(
             f"Geopotential height of the {_lev} hPa surface, interpolated linearly in log "
@@ -103,6 +105,7 @@ for _lev in PRESSURE_LEVELS_HPA:
             name=_n[_comp],
             long_name=f"{_dir} {_lev} hPa wind",
             units="m s-1",
+            max_error=0.1,  # m s-1
             standard_name=f"{_dir.lower()}_wind",
             description=(
                 f"{_dir} (earth-relative) component of the wind at {_lev} hPa, interpolated "

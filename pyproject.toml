@@ -23,6 +23,8 @@ dependencies = [
     "s3fs",
     "universal_pathlib",
     "cmocean",
+    "pillow",
+    "pillow-avif-plugin",  # AVIF composite maps (Pillow builds without libavif)
 ]
 
 [project.optional-dependencies]
@@ -65,6 +67,7 @@ jsonschema = ">=4.0"
 s3fs = ">=2024.1"  # -o s3://bucket/prefix
 universal_pathlib = ">=0.2.5"
 cmocean = ">=3.0"
+pillow-avif-plugin = ">=1.4"
 
 [tool.pixi.pypi-dependencies]
 modelatlasify = { path = ".", editable = true }

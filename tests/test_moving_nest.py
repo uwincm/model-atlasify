@@ -10,6 +10,7 @@ import rasterio
 from conftest import T0, run_out
 from wrf_fixture import hourly, write_wrfout
 from modelatlasify.cli import main
+from modelatlasify.core.variables import get_variable
 from modelatlasify.models.wrf.adapter import WRFAdapter
 
 DX2 = 4000.0
@@ -63,7 +64,9 @@ def test_products_follow_the_nest(moving_run, tmp_path):
             wind = src.read(1)
         bboxes.append(item["bbox"])
         # Wind is attached to the ground: 5 (1 + i/nx), i on the first lattice.
-        np.testing.assert_allclose(wind[0], 5 * (1 + (np.arange(20) + k * MOVE[0]) / 20), rtol=1e-5)
+        # (GeoTIFFs keep values to within the variable's max_error, plus float32 rounding.)
+        np.testing.assert_allclose(wind[0], 5 * (1 + (np.arange(20) + k * MOVE[0]) / 20), rtol=0,
+                                   atol=get_variable("surface_wind_speed").max_error * 1.00001)
     assert len(set(origins)) == 4 and bboxes[0] != bboxes[-1]
 
     collection = json.loads((run_dir / "collection.json").read_text())
@@ -82,7 +85,7 @@ def test_products_follow_the_nest(moving_run, tmp_path):
     assert np.isnan(amount[-1, :]).all()  # nest moved south by one row: bottom row is new
     assert np.isnan(amount[:, -MOVE[0]:]).all()  # and east by two columns
 
-    images = list((run_dir / "model-images" / "full").rglob("*.png"))
+    images = list((run_dir / "model-images" / "full").rglob("*.avif"))
     # One composite per mapped d01 GeoTIFF (u10/v10 have no maps of their own).
     assert len(images) == len([p for p in run_dir.glob("items/d01-*/*.tif")
                                if p.stem not in ("u10", "v10")])

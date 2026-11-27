@@ -60,6 +60,12 @@ def write_geotiff(
         tags["end_time"] = _iso(field.end_time)
     if field.provenance:
         tags["provenance"] = json.dumps(field.provenance)
+    # Lossy but bounded (LERC) when the variable allows it; lossless otherwise.
+    if variable.max_error is not None:
+        tags["max_error"] = f"{variable.max_error:g}"
+        compression = dict(compress="LERC_ZSTD", max_z_error=variable.max_error)
+    else:
+        compression = dict(compress="DEFLATE", predictor="FLOATING_POINT")
     tags.update(extra_tags or {})
 
     profile = dict(
@@ -69,6 +75,7 @@ def write_geotiff(
     # Write to memory, then translate to a COG (tiled, overviews, internal
     # compression) so the files are ready for HTTP range requests later. The
     # COG is built in memory too and written (or uploaded to S3) in one go.
+    # LERC keeps every value within max_error of the input (NaN stays NaN).
     with MemoryFile() as mem, MemoryFile(ext=".tif") as cog:
         with mem.open(**profile) as dst:
             dst.write(data, 1)
@@ -78,8 +85,8 @@ def write_geotiff(
             dst.update_tags(AREA_OR_POINT="Area", model_grid=grid.description)
         with mem.open() as src:
             rasterio.shutil.copy(
-                src, cog.name, driver="COG", compress="DEFLATE", predictor="FLOATING_POINT",
-                blocksize=512, overview_resampling="average",
+                src, cog.name, driver="COG", blocksize=512, overview_resampling="average",
+                **compression,
             )
         cog.seek(0)
         storage.write_bytes(path, cog.read())

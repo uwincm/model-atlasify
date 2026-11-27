@@ -16,8 +16,8 @@ import logging
 import math
 import textwrap
 import warnings
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
 
 import matplotlib
 
@@ -115,6 +115,46 @@ class MapView:
     center_lon: float = 0.0
 
 
+@dataclass(frozen=True)
+class MapLayout:
+    """How big a map is drawn and how it is saved."""
+
+    width_in: float  # figure width; fonts are in points, so a narrower figure
+    #                  makes the text larger relative to the map
+    width_px: int  # image width in pixels (dpi = width_px / width_in)
+    max_ticks: int  # at most this many colour-bar labels
+    palette: bool = False  # PNG as 8-bit palette (256 colours) instead of RGBA
+    # Vector and direction-marker lattices are this many times coarser than
+    # the style's (arrows grow with the spacing), so a small map is not crowded.
+    vector_spacing: float = 1.0
+
+    @property
+    def dpi(self) -> float:
+        return self.width_px / self.width_in
+
+    @property
+    def thick(self) -> float:
+        """Arrow widths (given as fractions of the map or figure) are scaled
+        by this, so they are as thick in inches as on an 11-inch-wide map."""
+        return 11.0 / self.width_in
+
+    def vectors(self, style: VectorStyle) -> VectorStyle:
+        """``style`` with this layout's lattice spacing."""
+        f = self.vector_spacing
+        if f == 1.0:
+            return style
+        return replace(style, spacing_km=style.spacing_km * f, km_per_unit=style.km_per_unit * f,
+                       min_across=max(4, round(style.min_across / f)))
+
+
+#: Composite maps (model-images/): 1210 px wide.
+FULL = MapLayout(width_in=11.0, width_px=1210, max_ticks=20)
+#: Per-item preview maps (STAC "visual"/"overview" assets): 500 px wide, an
+#: 8-bit palette PNG (about 35-40 KB instead of 250-300 KB), with the same
+#: fonts on a figure half as wide, so the text stays readable.
+PREVIEW = MapLayout(width_in=5.5, width_px=500, max_ticks=9, palette=True, vector_spacing=2.0)
+
+
 def full_view(grid: GridDefinition) -> MapView:
     """The grid's whole area: in its own projection, or in a lon/lat box
     around it (plus a buffer) when ``grid.uses_lonlat_view``."""
@@ -164,7 +204,7 @@ def subarea_view(area: SubArea) -> MapView:
 
 def plot_field(
     path: Path, field: FieldResult, grid: GridDefinition, variable: VariableDefinition,
-    title: str, subtitle: str = "", dpi: int = 110,
+    title: str, subtitle: str = "", layout: MapLayout = PREVIEW,
     overlay: tuple[VariableDefinition, FieldResult | None] | None = None,
     vectors: VectorLayers | None = None, vector_style: VectorStyle | None = None,
     directions: Directions | None = None,
@@ -173,13 +213,13 @@ def plot_field(
     field on the same grid drawn on top (None field = nothing to overlay);
     ``vectors`` = (eastward, northward) wind layers (on this grid or others,
     coarsest first), drawn as arrows; ``directions`` drawn as direction
-    markers."""
+    markers. By default a small preview (``PREVIEW``)."""
     over = None
     if overlay is not None and overlay[1] is not None:
         over = (overlay[0], [(overlay[1].data, grid)])
     # In a lon/lat box the grid's edge is inside the map: outline it.
     return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
-                     outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi, overlay=over,
+                     outlines=[grid] if grid.uses_lonlat_view else [], layout=layout, overlay=over,
                      vectors=vectors, vector_style=vector_style, directions=directions)
 
 
@@ -187,7 +227,7 @@ def plot_composite(
     path: Path, base: tuple[np.ndarray, GridDefinition],
     nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
     title: str, subtitle: str = "", area: SubArea | None = None, domain_edge: bool = False,
-    dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
+    layout: MapLayout = FULL, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
     vector_style: VectorStyle | None = None, directions: Directions | None = None,
 ) -> Path:
     """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
@@ -204,7 +244,7 @@ def plot_composite(
     return _draw_map(path, view, [base, *nests], variable, title, subtitle,
                      outlines=[g for _, g in nests] + ([base_grid] if solid_edge else []),
                      dashed_outlines=[base_grid] if domain_edge and not solid_edge else [],
-                     dpi=dpi, overlay=overlay, vectors=vectors, vector_style=vector_style,
+                     layout=layout, overlay=overlay, vectors=vectors, vector_style=vector_style,
                      directions=directions)
 
 
@@ -212,15 +252,16 @@ def _draw_map(
     path: Path, view: MapView, layers: Layers,
     variable: VariableDefinition, title: str, subtitle: str = "",
     outlines: list[GridDefinition] = (), dashed_outlines: list[GridDefinition] = (),
-    dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
-    vector_style: VectorStyle | None = None, directions: Directions | None = None,
+    layout: MapLayout = FULL, overlay: Overlay | None = None,
+    vectors: VectorLayers | None = None, vector_style: VectorStyle | None = None,
+    directions: Directions | None = None,
 ) -> Path:
     """Draw ``layers`` (coarsest first) in ``view``, ``overlay``, wind
     ``vectors`` and ``directions`` markers on top."""
     proj = view.projection
     x0, x1, y0, y1 = view.extent
     aspect = (x1 - x0) / (y1 - y0)
-    width_in = 11.0
+    width_in, dpi = layout.width_in, layout.dpi
     map_h = min(max(width_in / aspect, 3.0), 10.0)
     fig = plt.figure(figsize=(width_in, map_h + 1.6))
     ax = fig.add_axes([0.06, 0.20, 0.88, 0.66], projection=proj)
@@ -241,10 +282,11 @@ def _draw_map(
             bx, by = _outline_in_view(view, grid)
             ax.plot(bx, by, color="black", linewidth=1.2, linestyle=style, transform=proj,
                     zorder=3)
+    vstyle = layout.vectors(vector_style or WIND_VECTORS)
     if vectors:
-        _draw_vectors(fig, ax, view, vectors, vector_style or WIND_VECTORS)
+        _draw_vectors(fig, ax, view, vectors, vstyle, thick=layout.thick)
     if directions:
-        _draw_directions(fig, ax, view, directions, vector_style or WIND_VECTORS)
+        _draw_directions(fig, ax, view, directions, vstyle, thick=layout.thick)
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
         gl.top_labels = False
@@ -254,21 +296,63 @@ def _draw_map(
         ax.gridlines(linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
 
     if over_img is None:
-        _colorbar(fig, [0.2, 0.08, 0.6, 0.03], img, variable)
+        _colorbar(fig, [0.2, 0.08, 0.6, 0.03], img, variable, layout.max_ticks)
     else:  # two colour bars side by side
-        _colorbar(fig, [0.06, 0.08, 0.4, 0.03], img, variable)
-        _colorbar(fig, [0.54, 0.08, 0.4, 0.03], over_img, overlay[0])
+        _colorbar(fig, [0.06, 0.08, 0.4, 0.03], img, variable, layout.max_ticks // 2 + 1)
+        _colorbar(fig, [0.54, 0.08, 0.4, 0.03], over_img, overlay[0], layout.max_ticks // 2 + 1)
 
-    fig.text(0.06, 0.95, title, fontsize=12, fontweight="bold", va="top")
+    brand = fig.text(0.94, 0.95, "ModelAtlasify", fontsize=8, ha="right", va="top", color="0.5")
+    texts = [(fig.text(0.06, 0.95, title, fontsize=12, fontweight="bold", va="top"), brand)]
     if subtitle:
-        fig.text(0.06, 0.905, subtitle, fontsize=9, va="top", color="0.25")
-    fig.text(0.94, 0.95, "ModelAtlasify", fontsize=8, ha="right", va="top", color="0.5")
+        texts.append((fig.text(0.06, 0.905, subtitle, fontsize=9, va="top", color="0.25"), None))
+    fig.set_dpi(dpi)
+    renderer = fig.canvas.get_renderer()
+    for text, right_of in texts:  # shrink a long title/subtitle until it fits
+        right = (right_of.get_window_extent(renderer).x0 - 8 if right_of is not None
+                 else 0.985 * fig.bbox.width)
+        while text.get_window_extent(renderer).x1 > right and text.get_fontsize() > 5:
+            text.set_fontsize(text.get_fontsize() - 0.5)
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi)
+    data = _encode(fig, PurePosixPath(str(path)).suffix.lower(), dpi,  # local or s3:// path
+                   palette=layout.palette)
     plt.close(fig)
-    storage.write_bytes(path, buf.getvalue())  # a local file, or straight to S3
+    storage.write_bytes(path, data)  # a local file, or straight to S3
     return path
+
+
+#: AVIF quality (0-100) of the composite maps. At 75 they look the same as
+#: the PNGs (text, arrows and fine precipitation detail included) at about a
+#: third of the size; at 60 small features start to soften.
+AVIF_QUALITY = 75
+
+
+def _encode(fig, suffix: str, dpi: float, palette: bool = False) -> bytes:
+    """The figure as a ``.png`` (``palette``: 8-bit, 256 colours) or
+    ``.avif`` file's bytes."""
+    if suffix == ".png" and not palette:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi)
+        return buf.getvalue()
+    if suffix not in (".png", ".avif"):
+        raise ValueError(f"Maps are written as .png or .avif, not '{suffix}'.")
+    from PIL import Image, features
+
+    fig.set_dpi(dpi)
+    fig.canvas.draw()  # the same pixels savefig would write
+    w, h = fig.canvas.get_width_height(physical=True)
+    rgb = Image.frombuffer("RGBA", (w, h), fig.canvas.buffer_rgba(), "raw", "RGBA", 0, 1
+                           ).convert("RGB")
+    buf = io.BytesIO()
+    if suffix == ".png":
+        # Maps have few distinct colours (colour levels, text, lines): 256
+        # are plenty, and an 8-bit PNG is about a third of the RGB one.
+        rgb.quantize(256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE).save(
+            buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    if not features.check("avif"):  # Pillow built without libavif: use the plugin
+        import pillow_avif  # noqa: F401 - registers the AVIF format with Pillow
+    rgb.save(buf, format="AVIF", quality=AVIF_QUALITY)
+    return buf.getvalue()
 
 
 def _draw_layers(ax, view: MapView, layers: Layers, variable: VariableDefinition,
@@ -364,7 +448,7 @@ def _smooth121(data: np.ndarray, passes: int) -> np.ndarray:
 
 
 def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
-                  style: VectorStyle = WIND_VECTORS) -> None:
+                  style: VectorStyle = WIND_VECTORS, thick: float = 1.0) -> None:
     """Arrows (wind, currents) on a square lattice spaced ``style.spacing_km``
     apart on the ground, or closer if that gives fewer than
     ``style.min_across`` arrows across the map (then exactly that many across,
@@ -386,7 +470,7 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
     gx, gy = gx.ravel(), gy.ravel()
     lon, lat = _view_to_lonlat(view, gx, gy)
     if style.curly:
-        _draw_curly(fig, ax, view, vectors, style, lon, lat, step, m_per_unit, per_m)
+        _draw_curly(fig, ax, view, vectors, style, lon, lat, step, m_per_unit, per_m, thick)
         return
     u, v = _sample_nearest([((ue, ve), grid) for ue, ve, grid in vectors], lon, lat)
     speed = np.hypot(u, v)
@@ -399,7 +483,7 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
     du = length_m * (u / speed * east[0] + v / speed * north[0])
     dv = length_m * (u / speed * east[1] + v / speed * north[1])
     q = ax.quiver(gx, gy, du, dv, angles="xy", scale_units="xy", scale=1, pivot="middle",
-                  transform=view.projection, color="black", width=0.0016, headwidth=4,
+                  transform=view.projection, color="black", width=0.0016 * thick, headwidth=4,
                   headlength=4.5, headaxislength=4, zorder=2.5)
     # Key: the largest round speed whose arrow fits beside the colour bar.
     ax.apply_aspect()  # equal-aspect maps can be narrower than their axes box
@@ -442,7 +526,7 @@ DIRECTION_LENGTH = 0.825
 
 
 def _draw_directions(fig, ax, view: MapView, directions: Directions,
-                     style: VectorStyle = WIND_VECTORS) -> None:
+                     style: VectorStyle = WIND_VECTORS, thick: float = 1.0) -> None:
     """Direction markers: same-length white arrows (black edge) pointing the
     way the flow goes (the field is the direction it comes *from*, degrees
     clockwise from north), on the wind arrows' lattice (``style``) shifted by
@@ -466,15 +550,18 @@ def _draw_directions(fig, ax, view: MapView, directions: Directions,
     du = np.sin(to) * east[0] + np.cos(to) * north[0]
     dv = np.sin(to) * east[1] + np.cos(to) * north[1]
     scale = DIRECTION_LENGTH * step / np.hypot(du, dv)  # same length on the map
-    arrow = dict(color="white", edgecolor="black", linewidth=0.5, width=0.0028, headwidth=3.2,
+    arrow = dict(color="white", edgecolor="black", linewidth=0.5, width=0.0028 * thick,
+                 headwidth=3.2,
                  headlength=3.5, headaxislength=3.2)
     ax.quiver(gx, gy, du * scale, dv * scale, angles="xy", scale_units="xy", scale=1,
               pivot="middle", transform=view.projection, zorder=2.6, **arrow)
     # Key, at the left (the wind key is at the right).
     from matplotlib.patches import FancyArrow
 
-    fig.add_artist(FancyArrow(0.075, 0.11, 0.04, 0, width=0.004, head_width=0.012,
-                              head_length=0.01, length_includes_head=True, facecolor="white",
+    kl = 0.04 * thick
+    fig.add_artist(FancyArrow(0.095 - kl / 2, 0.11, kl, 0, width=0.004 * thick,
+                              head_width=0.012 * thick, head_length=0.01 * thick,
+                              length_includes_head=True, facecolor="white",
                               edgecolor="black", linewidth=0.5, transform=fig.transFigure))
     fig.text(0.095, 0.095, textwrap.fill(label, 14), ha="center", va="top", fontsize=8)
 
@@ -485,7 +572,7 @@ CURLY_STEPS = 24
 
 def _draw_curly(fig, ax, view: MapView, vectors: VectorLayers, style: VectorStyle,
                 lon: np.ndarray, lat: np.ndarray, step: float, m_per_unit: float,
-                per_m: float) -> None:
+                per_m: float, thick: float = 1.0) -> None:
     """Curly vectors: through each lattice point (``lon``/``lat``), a short
     streamline of the flow, half upstream and half downstream of the point,
     with an arrowhead at its downstream end. Its length on the ground is what
@@ -548,8 +635,9 @@ def _draw_curly(fig, ax, view: MapView, vectors: VectorLayers, style: VectorStyl
         return speed * m_per_unit * per_m / (x1 - x0) * map_width_frac
     key = next((s for s in style.key_speeds if key_frac(s) <= 0.08), style.key_speeds[-1])
     kl = key_frac(key)
-    fig.add_artist(FancyArrow(0.905 - kl / 2, 0.11, kl, 0, width=0.0012, head_width=0.008,
-                              head_length=min(0.006, kl / 2), length_includes_head=True,
+    fig.add_artist(FancyArrow(0.905 - kl / 2, 0.11, kl, 0, width=0.0012 * thick,
+                              head_width=0.008 * thick,
+                              head_length=min(0.006 * thick, kl / 2), length_includes_head=True,
                               color="black", transform=fig.transFigure))
     fig.text(0.905, 0.095, f"{key:g} {style.units} (curve length)\n(max {style.max_speed:g})",
              ha="center", va="top", fontsize=8)
@@ -668,15 +756,17 @@ def _ground_axes(view: MapView, x: np.ndarray, y: np.ndarray
             np.array([(xn - x) / north_m, (yn - y) / north_m]))
 
 
-def _colorbar(fig, rect: list[float], mappable, variable: VariableDefinition) -> None:
+def _colorbar(fig, rect: list[float], mappable, variable: VariableDefinition,
+              max_ticks: int = 20) -> None:
     cax = fig.add_axes(rect)
     cb = fig.colorbar(mappable, cax=cax, orientation="horizontal", extend=variable.extend,
                       spacing="uniform")
     cb.set_label(f"{variable.long_name} ({variable.units})", fontsize=9)
     cb.ax.tick_params(labelsize=8)
     if variable.levels:
-        # Label every level, or every other one when there are too many to fit.
-        ticks = variable.levels if len(variable.levels) <= 20 else variable.levels[::2]
+        # Label every level, or every 2nd, 3rd, ... one: at most max_ticks.
+        step = -(-len(variable.levels) // max_ticks)  # ceiling division
+        ticks = variable.levels[::step]
         cb.set_ticks(ticks)
         cb.set_ticklabels([f"{v:g}" for v in ticks])
 

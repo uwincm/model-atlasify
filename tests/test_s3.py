@@ -84,7 +84,7 @@ def test_cli_writes_everything_to_s3(s3, tmp_path, monkeypatch, capsys):
     assert any(k.startswith("atlas/run01/command-used.") for k in keys)
     tifs = sorted(k for k in keys if k.endswith(".tif"))
     assert len(tifs) == 3 * 3 + 3 + 2  # wind speed + u10 + v10, precipitation, interval
-    assert any(k.startswith("atlas/run01/model-images/full/precipitation/") and k.endswith(".png")
+    assert any(k.startswith("atlas/run01/model-images/full/precipitation/") and k.endswith(".avif")
                for k in keys)
     assert not any(".modelatlasify-write-check" in k for k in keys)  # probe cleaned up
 
@@ -100,7 +100,8 @@ def test_cli_writes_everything_to_s3(s3, tmp_path, monkeypatch, capsys):
 
     assert ctype("atlas/catalog.json") == "application/json"
     assert ctype("atlas/run01/model-images.html").startswith("text/html")
-    assert ctype(next(k for k in keys if k.endswith(".png"))) == "image/png"
+    assert ctype(next(k for k in keys if k.endswith(".png"))) == "image/png"  # per-item maps
+    assert ctype(next(k for k in keys if k.endswith(".avif"))) == "image/avif"  # composites
     assert ctype(tifs[0]).startswith("image/tiff")
 
 

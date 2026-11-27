@@ -33,6 +33,7 @@ S3_PREFIX = "s3://"
 CONTENT_TYPES = {
     ".tif": "image/tiff; application=geotiff; profile=cloud-optimized",
     ".png": "image/png",
+    ".avif": "image/avif",
     ".json": "application/json",
     ".html": "text/html; charset=utf-8",
     ".txt": "text/plain; charset=utf-8",
