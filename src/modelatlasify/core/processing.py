@@ -172,7 +172,8 @@ _worker: dict = {}
 def _init_worker(models: list[str], datasets: dict[tuple[str, str], ModelDataset], output: Path,
                  variables: list[str], plots: bool, log_levels: dict[str, int],
                  basemap: str | None = None,
-                 run_levels: dict[tuple[str, str], tuple[float, ...]] | None = None) -> None:
+                 run_levels: dict[tuple[str, str, str], tuple[float, ...]] | None = None
+                 ) -> None:
     for name, level in log_levels.items():
         if name == "":
             logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
@@ -189,10 +190,13 @@ def _init_worker(models: list[str], datasets: dict[tuple[str, str], ModelDataset
                    plot_composite=plot_composite, run_levels=run_levels or {})
 
 
-def _run_style(run_id: str, var: VariableDefinition) -> VariableDefinition:
-    """``var`` with this run's colour levels, if they were adapted to the run
-    (VariableDefinition.levels_shift_step)."""
-    levels = _worker.get("run_levels", {}).get((run_id, var.name))
+def _run_style(run_id: str, var: VariableDefinition, area: str = FULL_AREA
+               ) -> VariableDefinition:
+    """``var`` with this run's colour levels in plot ``area``, if they were
+    adapted to the run (VariableDefinition.levels_shift_step): the area's own,
+    else the whole domain's."""
+    run_levels = _worker.get("run_levels", {})
+    levels = run_levels.get((run_id, var.name, area), run_levels.get((run_id, var.name, FULL_AREA)))
     return var if levels is None else dataclasses.replace(var, levels=levels)
 
 
@@ -427,7 +431,8 @@ def _plot_composite(task: _CompositeTask) -> Path:
     base_id, bi, base_tif, meta = task.base
     base_ds: ModelDataset = datasets[(task.run_id, base_id)]
     var = get_variable(task.variable)
-    style = _run_style(task.run_id, get_variable(var.draws) if var.draws else var)  # as drawn
+    area = FULL_AREA if task.area is None else task.area.name
+    style = _run_style(task.run_id, get_variable(var.draws) if var.draws else var, area)
     nests = []
     for nid, ni, tif in task.nests:
         nest: ModelDataset = datasets[(task.run_id, nid)]
@@ -439,7 +444,7 @@ def _plot_composite(task: _CompositeTask) -> Path:
         over_layers = [(_read_tif(over_tif), base_ds.grid_at(bi))] + [
             (None if t is None else _read_tif(t), grid)
             for t, (_, grid) in zip(task.overlay_nests, nests)]
-        overlay = (_run_style(task.run_id, get_variable(var.overlay)), over_layers)
+        overlay = (_run_style(task.run_id, get_variable(var.overlay), area), over_layers)
     vectors = _read_vectors(task.run_id, task.vectors) if task.vectors else None
     directions = None
     if task.directions:
@@ -517,7 +522,8 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                 prefetch_geography(ds.grid)
             for area in options.sub_areas:
                 prefetch_geography(area)
-        run_levels = _adapt_levels(runs, variables, adapters, report) if options.plots else {}
+        run_levels = (_adapt_levels(runs, variables, adapters, report, options.sub_areas)
+                      if options.plots else {})
         for adapter in adapter_list:
             adapter.close()  # workers open their own file handles
 
@@ -624,14 +630,17 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
 
 
 def _adapt_levels(runs: dict[str, list[ModelDataset]], variables: list[str],
-                  adapters: dict[str, ModelAdapter], report: Callable[[str], None]
-                  ) -> dict[tuple[str, str], tuple[float, ...]]:
+                  adapters: dict[str, ModelAdapter], report: Callable[[str], None],
+                  sub_areas: list[SubArea] = ()
+                  ) -> dict[tuple[str, str, str], tuple[float, ...]]:
     """Each run's colour levels for the variables that adapt them
-    (VariableDefinition.levels_shift_step), keyed by (run id, variable):
-    shifted to fit the field of the run's outermost domain that makes it
-    (e.g. d01) at its first time, or the next time whose field passes the
-    checks."""
-    out: dict[tuple[str, str], tuple[float, ...]] = {}
+    (VariableDefinition.levels_shift_step), keyed by (run id, variable, plot
+    area): shifted to fit the field of the run's outermost domain that makes
+    it (e.g. d01) at its first time, or the next time whose field passes the
+    checks. ``full`` (the whole domain; also every per-item map) uses all of
+    that field; each sub-area only its points inside the area (none: the
+    whole domain's levels)."""
+    out: dict[tuple[str, str, str], tuple[float, ...]] = {}
     for run_id, datasets in runs.items():
         for vname in variables:
             var = get_variable(vname)
@@ -650,12 +659,40 @@ def _adapt_levels(runs: dict[str, list[ModelDataset]], variables: list[str],
                 except FieldQualityError:
                     continue
                 levels = shifted_levels(var.levels, var.levels_shift_step, fld.data)
-                out[(run_id, vname)] = levels
-                report(f"  {vname} colour scale for run '{base.run_path or run_id}': "
-                       f"{levels[0]:g} to {levels[-1]:g} {var.units} (fits {base.dataset_id} "
-                       f"at {valid:%Y-%m-%d %H:%M} UTC)")
+                out[(run_id, vname, FULL_AREA)] = levels
+                text = f"{levels[0]:g} to {levels[-1]:g}"
+                if sub_areas:
+                    lon, lat = _cell_lonlat(base.grid_at(ti))
+                    for area in sub_areas:
+                        inside = _in_area(area, lon, lat)
+                        if not inside.any():
+                            continue
+                        lv = shifted_levels(var.levels, var.levels_shift_step, fld.data[inside])
+                        out[(run_id, vname, area.name)] = lv
+                        text += f", area '{area.name}' {lv[0]:g} to {lv[-1]:g}"
+                report(f"  {vname} colour scale for run '{base.run_path or run_id}': {text} "
+                       f"{var.units} (fits {base.dataset_id} at {valid:%Y-%m-%d %H:%M} UTC)")
                 break
     return out
+
+
+def _cell_lonlat(grid) -> tuple[np.ndarray, np.ndarray]:
+    """Cell-centre lon/lat (north-up, like the data) of ``grid``."""
+    if grid.lon is not None and grid.lat is not None:
+        return np.asarray(grid.lon), np.asarray(grid.lat)
+    from pyproj import Transformer
+
+    rows, cols = np.mgrid[0:grid.height, 0:grid.width]
+    t = grid.transform
+    x, y = t * (cols + 0.5, rows + 0.5)
+    lon, lat = Transformer.from_crs(grid.crs, grid.crs.geodetic_crs, always_xy=True).transform(x, y)
+    return np.asarray(lon), np.asarray(lat)
+
+
+def _in_area(area: SubArea, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+    """Which lon/lat points are inside ``area`` (antimeridian-safe)."""
+    return (((lon - area.west) % 360.0 <= area.east - area.west)
+            & (lat >= area.south) & (lat <= area.north))
 
 
 def _variables_for(requested: list[str] | None, adapters: list[ModelAdapter]) -> list[str]:

@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Maps
+- 2 m temperature composites of each `--plot-sub-areas` area get their own
+  colour range, by the same rule as the whole domain's (5 C shifts fitting
+  the d01 points inside the area at the run's first time).
 - Per-item maps are 500 px wide 8-bit palette PNG previews (were 1210 px
   RGBA PNGs): about a sixth of the size. They use a compact layout (same
   fonts on a half-width figure, fewer colour bar labels, a coarser arrow
