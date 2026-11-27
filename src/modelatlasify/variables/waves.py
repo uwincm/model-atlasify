@@ -60,6 +60,7 @@ SIGNIFICANT_WAVE_HEIGHT = register(
         levels=_SWH_LEVELS,
         extend="max",
         vectors=("u10", "v10"),  # 10 m wind vectors on the maps
+        directions="dominant_wave_direction",  # and which way the waves go
         aliases=("swh", "hs", "wave_height", "waves"),
     )
 )

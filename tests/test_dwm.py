@@ -347,7 +347,7 @@ def test_wave_directions_are_degrees_from_clockwise_from_north(tmp_path):
     assert mwd.provenance["source_variables"] == ["mwd"]
 
 
-def test_period_maps_get_wave_direction_markers(tmp_path, monkeypatch, capsys):
+def test_wave_maps_get_wave_direction_markers(tmp_path, monkeypatch, capsys):
     from modelatlasify.plotting import maps
 
     run = tmp_path / "w"
@@ -357,18 +357,18 @@ def test_period_maps_get_wave_direction_markers(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (
         seen.append((path.name, k.get("directions"))), real(path, *a, **k))[1])
     assert main([str(run), "-o", str(tmp_path / "atlas"), "--no-validate",
-                 "--variables", "dwp,mwp,swh"]) == 0
+                 "--variables", "swh,dwp,mwp"]) == 0
     err = capsys.readouterr().err
     assert "Also making dominant_wave_direction" in err
     assert "Also making mean_wave_direction" in err
-    for period, label in (("dominant_wave_period", "Dominant wave direction"),
+    for period, label in (("significant_wave_height", "Dominant wave direction"),
+                          ("dominant_wave_period", "Dominant wave direction"),
                           ("mean_wave_period", "Mean wave direction")):
         drawn = [d for name, d in seen if f"{period}." in name]
         assert len(drawn) == 2  # per-item map and composite
         for lab, layers in drawn:
             assert lab == label and len(layers) == 1
             assert np.nanmax(layers[0][0]) <= 360.0
-    assert all(d is None for name, d in seen if "significant_wave_height" in name)
 
 
 def test_directions_missing_from_older_output_leave_out_the_markers(tmp_path, monkeypatch):

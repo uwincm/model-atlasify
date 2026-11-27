@@ -66,7 +66,8 @@ changed, and [Next steps](#next-steps) for what comes next.
 - **Waves** (DWM): significant wave height (m), mean wave period (s), dominant
   wave period (s), and mean and dominant wave direction (degrees, the
   direction waves come from; GeoTIFFs, drawn as white arrows on the matching
-  period maps). Land is missing. Wave height maps use "turbo" with the
+  period maps, and the dominant direction on the wave height maps). Land is
+  missing. Wave height maps use "turbo" with the
   lowest band (0–0.5 m) white, so calm seas and the wind vectors over them
   stand out. Wave period maps use cmocean "tempo" reversed (dark for short
   periods, light for long-period swell) without its white end: 0–12 s in 1 s
@@ -382,16 +383,16 @@ in a box around the domain's outer edge plus 1° on every side.
   from true north that the waves come **from** (0 = from the north, 270 =
   from the west), `(270 - degrees(dwd)) mod 360`. Units other than `rad` are
   an error.
-- They are GeoTIFFs only, with no maps of their own. The matching period
-  maps (dominant direction on `dominant_wave_period`, mean direction on
-  `mean_wave_period`; per item and composites) draw them as white arrows with
-  black edges, all the same length, pointing the way the waves go. They sit
-  on the wind arrows' lattice shifted by half a spacing in x and y, so the
-  two sets of arrows fall between each other. A key at the bottom left names
-  them.
-- Requesting a wave period also makes its direction. Output without `dwd` or
-  `mwd` (older DWM/UMWM) skips that direction, and its period maps have no
-  direction arrows.
+- They are GeoTIFFs only, with no maps of their own. The wave maps (dominant
+  direction on `significant_wave_height` and `dominant_wave_period`, mean
+  direction on `mean_wave_period`; per item and composites) draw them as white
+  arrows with black edges, all the same length, pointing the way the waves
+  go. They sit on the wind arrows' lattice shifted by half a spacing in x and
+  y, so the two sets of arrows fall between each other. A key at the bottom
+  left names them.
+- Requesting a wave height or period also makes the direction its maps draw.
+  Output without `dwd` or `mwd` (older DWM/UMWM) skips that direction, and
+  the maps that draw it have no direction arrows.
 
 ### Surface wind speed
 
