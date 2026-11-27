@@ -42,6 +42,7 @@ T2M = register(
         ),
         cmap=get_colormap_t2m(),
         levels=T2M_LEVELS,
+        levels_shift_step=5.0,  # each run: shifted by 5 C steps to fit d01 at the start
         extend="both",
         vectors=("u10", "v10"),
         aliases=("temperature", "t2", "2m_temperature"),
