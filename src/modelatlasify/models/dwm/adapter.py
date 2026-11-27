@@ -54,7 +54,14 @@ FIELDS = {
     "significant_wave_height": ("swh", "m"),
     "mean_wave_period": ("mwp", "s"),
     "dominant_wave_period": ("dwp", "s"),
+    # DWM directions are the way the waves go, counterclockwise from east
+    # (earth-relative, like its wdir); published as CF "from" directions,
+    # clockwise from north (see compute).
+    "dominant_wave_direction": ("dwd", "rad"),
+    "mean_wave_direction": ("mwd", "rad"),
 }
+#: Of FIELDS, the directions (converted in compute).
+DIRECTIONS = ("dominant_wave_direction", "mean_wave_direction")
 
 #: main.nml settings copied into STAC metadata as ``dwm:<lowercase name>``.
 NAMELIST_KEYS = ("isGlobal", "mm", "nm", "om", "pm", "fmin", "fmax", "fprog",
@@ -158,6 +165,7 @@ class DWMAdapter(ModelAdapter):
         with netCDF4.Dataset(first, "r") as nc:
             lon = np.asarray(nc.variables["lon"][0], dtype=np.float64)
             lat = np.asarray(nc.variables["lat"][0], dtype=np.float64)
+            native_vars = sorted(nc.variables)
         grid, how, regrid_index, warnings = self._georeference(directory, lon, lat)
 
         namelist = self._namelist(directory)
@@ -197,7 +205,8 @@ class DWMAdapter(ModelAdapter):
             metadata=meta,
             source_dir=directory,
             time_sources=[p for _, p in entries],
-            adapter_state={"south_up": bool(lat[0, 0] < lat[-1, 0]), "regrid": regrid_index},
+            adapter_state={"south_up": bool(lat[0, 0] < lat[-1, 0]), "regrid": regrid_index,
+                           "native_vars": native_vars},
             warnings=warnings,
         )
 
@@ -282,6 +291,14 @@ class DWMAdapter(ModelAdapter):
     def supported_variables(self) -> list[str]:
         return list(FIELDS)
 
+    def unavailable_variables(self, dataset: ModelDataset) -> dict[str, str]:
+        """Fields missing from the output (e.g. dwd in older DWM/UMWM output)."""
+        have = dataset.adapter_state.get("native_vars")
+        if have is None:
+            return {}
+        return {v: f"no '{native}' in the DWM output" for v, (native, _) in FIELDS.items()
+                if native not in have}
+
     def compute(self, dataset: ModelDataset, variable: str, time_index: int) -> FieldResult | None:
         if variable not in FIELDS:
             raise VariableUnavailableError(
@@ -298,6 +315,13 @@ class DWMAdapter(ModelAdapter):
             raise VariableUnavailableError(
                 f"DWM {native} has units '{have}', expected '{units}'; refusing to guess.")
         data = np.ma.filled(np.ma.asarray(var[0], dtype=np.float64), np.nan)
+        method = f"DWM output field '{native}' ({getattr(var, 'description', native)}), "
+        if variable in DIRECTIONS:
+            # Way the waves go, counterclockwise from east -> where they come
+            # from, clockwise from north.
+            data = (270.0 - np.degrees(data)) % 360.0
+            method += ("converted from radians counterclockwise from east (the direction the "
+                       "waves go) to degrees clockwise from north (the direction they come from), ")
         if "seamask" in nc.variables:  # land is NaN already; make sure
             data[np.asarray(nc.variables["seamask"][0]) == 0] = np.nan
         index = dataset.adapter_state.get("regrid")
@@ -310,7 +334,7 @@ class DWMAdapter(ModelAdapter):
             data = data[::-1].copy()
         return FieldResult(variable, data, dataset.valid_times[time_index], provenance={
             "source_variables": [native],
-            "method": f"DWM output field '{native}' ({getattr(var, 'description', native)}), "
+            "method": method
                       + ("resampled to the lon/lat grid (nearest model cell)" if index is not None
                          else "as written") + "; land points missing",
         })

@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import logging
 import math
+import textwrap
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +98,9 @@ Layers = list[tuple[np.ndarray | None, GridDefinition]]
 Overlay = tuple[VariableDefinition, Layers]
 #: Wind vectors, coarsest grid first: (eastward, northward) in m s-1, north-up.
 VectorLayers = list[tuple[np.ndarray, np.ndarray, GridDefinition]]
+#: Direction markers: (key label, layers coarsest first of (degrees clockwise
+#: from north that the flow comes from, grid)).
+Directions = tuple[str, list[tuple[np.ndarray, GridDefinition]]]
 
 
 @dataclass(frozen=True)
@@ -163,18 +167,20 @@ def plot_field(
     title: str, subtitle: str = "", dpi: int = 110,
     overlay: tuple[VariableDefinition, FieldResult | None] | None = None,
     vectors: VectorLayers | None = None, vector_style: VectorStyle | None = None,
+    directions: Directions | None = None,
 ) -> Path:
     """Map of one field over its grid's whole area. ``overlay`` is another
     field on the same grid drawn on top (None field = nothing to overlay);
     ``vectors`` = (eastward, northward) wind layers (on this grid or others,
-    coarsest first), drawn as arrows."""
+    coarsest first), drawn as arrows; ``directions`` drawn as direction
+    markers."""
     over = None
     if overlay is not None and overlay[1] is not None:
         over = (overlay[0], [(overlay[1].data, grid)])
     # In a lon/lat box the grid's edge is inside the map: outline it.
     return _draw_map(path, full_view(grid), [(field.data, grid)], variable, title, subtitle,
                      outlines=[grid] if grid.uses_lonlat_view else [], dpi=dpi, overlay=over,
-                     vectors=vectors, vector_style=vector_style)
+                     vectors=vectors, vector_style=vector_style, directions=directions)
 
 
 def plot_composite(
@@ -182,7 +188,7 @@ def plot_composite(
     nests: list[tuple[np.ndarray | None, GridDefinition]], variable: VariableDefinition,
     title: str, subtitle: str = "", area: SubArea | None = None, domain_edge: bool = False,
     dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
-    vector_style: VectorStyle | None = None,
+    vector_style: VectorStyle | None = None, directions: Directions | None = None,
 ) -> Path:
     """Map of the base grid's whole area (or of ``area``, in lon/lat) with nested
     grids drawn on top (finest last) and their boundaries outlined in black. A
@@ -190,14 +196,16 @@ def plot_composite(
     outlines the base grid itself: dashed, or solid like the nests when the
     base grid is drawn in a lon/lat box (``uses_lonlat_view``). ``overlay`` is
     a second field (base grid first, then the nests) drawn on top, and
-    ``vectors`` wind arrows (each from the finest grid at its position)."""
+    ``vectors`` wind arrows and ``directions`` direction markers (each from
+    the finest grid at its position)."""
     base_grid = base[1]
     view = full_view(base_grid) if area is None else subarea_view(area)
     solid_edge = base_grid.uses_lonlat_view
     return _draw_map(path, view, [base, *nests], variable, title, subtitle,
                      outlines=[g for _, g in nests] + ([base_grid] if solid_edge else []),
                      dashed_outlines=[base_grid] if domain_edge and not solid_edge else [],
-                     dpi=dpi, overlay=overlay, vectors=vectors, vector_style=vector_style)
+                     dpi=dpi, overlay=overlay, vectors=vectors, vector_style=vector_style,
+                     directions=directions)
 
 
 def _draw_map(
@@ -205,10 +213,10 @@ def _draw_map(
     variable: VariableDefinition, title: str, subtitle: str = "",
     outlines: list[GridDefinition] = (), dashed_outlines: list[GridDefinition] = (),
     dpi: int = 110, overlay: Overlay | None = None, vectors: VectorLayers | None = None,
-    vector_style: VectorStyle | None = None,
+    vector_style: VectorStyle | None = None, directions: Directions | None = None,
 ) -> Path:
-    """Draw ``layers`` (coarsest first) in ``view``, ``overlay`` and wind
-    ``vectors`` on top."""
+    """Draw ``layers`` (coarsest first) in ``view``, ``overlay``, wind
+    ``vectors`` and ``directions`` markers on top."""
     proj = view.projection
     x0, x1, y0, y1 = view.extent
     aspect = (x1 - x0) / (y1 - y0)
@@ -235,6 +243,8 @@ def _draw_map(
                     zorder=3)
     if vectors:
         _draw_vectors(fig, ax, view, vectors, vector_style or WIND_VECTORS)
+    if directions:
+        _draw_directions(fig, ax, view, directions, vector_style or WIND_VECTORS)
     try:
         gl = ax.gridlines(draw_labels=True, linewidth=0.4, color="0.4", alpha=0.6, linestyle="--")
         gl.top_labels = False
@@ -378,22 +388,7 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
     if style.curly:
         _draw_curly(fig, ax, view, vectors, style, lon, lat, step, m_per_unit, per_m)
         return
-    u = np.full(gx.shape, np.nan)
-    v = np.full(gx.shape, np.nan)
-    for ue, ve, grid in reversed(vectors):  # finest first
-        todo = np.isnan(u) & np.isfinite(lon)
-        if not todo.any():
-            break
-        x, y = Transformer.from_crs(grid.crs.geodetic_crs, grid.crs, always_xy=True).transform(
-            lon[todo], lat[todo])
-        t = grid.transform
-        col = np.floor((np.asarray(x) - t.c) / t.a)
-        row = np.floor((np.asarray(y) - t.f) / t.e)
-        ok = np.isfinite(col) & np.isfinite(row) & (col >= 0) & (col < grid.width) \
-            & (row >= 0) & (row < grid.height)
-        idx = np.flatnonzero(todo)[ok]
-        r, c = row[ok].astype(int), col[ok].astype(int)
-        u[idx], v[idx] = np.asarray(ue)[r, c], np.asarray(ve)[r, c]
+    u, v = _sample_nearest([((ue, ve), grid) for ue, ve, grid in vectors], lon, lat)
     speed = np.hypot(u, v)
     keep = np.isfinite(speed) & (speed > 0)
     if not keep.any():
@@ -415,6 +410,73 @@ def _draw_vectors(fig, ax, view: MapView, vectors: VectorLayers,
     ax.quiverkey(q, 0.905, 0.095, key * m_per_unit * per_m,
                  f"{key:g} {style.units}\n(max {style.max_speed:g})", coordinates="figure",
                  labelpos="S", fontproperties={"size": 8})
+
+
+def _sample_nearest(layers: list[tuple[tuple[np.ndarray, ...], GridDefinition]],
+                    lon: np.ndarray, lat: np.ndarray) -> list[np.ndarray]:
+    """The fields of ``layers`` (coarsest first; each a tuple of fields on one
+    grid) at lon/lat points: from the finest grid with a value there (nearest
+    cell), NaN where none has one."""
+    n_fields = len(layers[0][0])
+    out = [np.full(np.shape(lon), np.nan) for _ in range(n_fields)]
+    for fields, grid in reversed(layers):  # finest first
+        todo = np.isnan(out[0]) & np.isfinite(lon)
+        if not todo.any():
+            break
+        x, y = Transformer.from_crs(grid.crs.geodetic_crs, grid.crs, always_xy=True).transform(
+            lon[todo], lat[todo])
+        t = grid.transform
+        col = np.floor((np.asarray(x) - t.c) / t.a)
+        row = np.floor((np.asarray(y) - t.f) / t.e)
+        ok = np.isfinite(col) & np.isfinite(row) & (col >= 0) & (col < grid.width) \
+            & (row >= 0) & (row < grid.height)
+        idx = np.flatnonzero(todo)[ok]
+        r, c = row[ok].astype(int), col[ok].astype(int)
+        for o, f in zip(out, fields):
+            o[idx] = np.asarray(f)[r, c]
+    return out
+
+
+#: Direction marker length, as a fraction of the lattice spacing.
+DIRECTION_LENGTH = 0.825
+
+
+def _draw_directions(fig, ax, view: MapView, directions: Directions,
+                     style: VectorStyle = WIND_VECTORS) -> None:
+    """Direction markers: same-length white arrows (black edge) pointing the
+    way the flow goes (the field is the direction it comes *from*, degrees
+    clockwise from north), on the wind arrows' lattice (``style``) shifted by
+    half a spacing in x and y, so the two sets sit between each other. Each is
+    taken from the finest grid covering it (nearest cell)."""
+    label, layers = directions
+    x0, x1, y0, y1 = view.extent
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    _, north_c = _ground_axes(view, np.array([cx]), np.array([cy]))
+    per_m = float(np.hypot(*north_c[:, 0]))
+    step = min(style.spacing_km * 1e3 * per_m, (x1 - x0) / style.min_across)
+    gx, gy = np.meshgrid(np.arange(x0 + step, x1, step), np.arange(y0 + step, y1, step))
+    gx, gy = gx.ravel(), gy.ravel()
+    lon, lat = _view_to_lonlat(view, gx, gy)
+    (deg,) = _sample_nearest([((d,), g) for d, g in layers], lon, lat)
+    keep = np.isfinite(deg)
+    if not keep.any():
+        return
+    gx, gy, to = gx[keep], gy[keep], np.radians(deg[keep] + 180.0)  # bearing it goes to
+    east, north = _ground_axes(view, gx, gy)
+    du = np.sin(to) * east[0] + np.cos(to) * north[0]
+    dv = np.sin(to) * east[1] + np.cos(to) * north[1]
+    scale = DIRECTION_LENGTH * step / np.hypot(du, dv)  # same length on the map
+    arrow = dict(color="white", edgecolor="black", linewidth=0.5, width=0.0028, headwidth=3.2,
+                 headlength=3.5, headaxislength=3.2)
+    ax.quiver(gx, gy, du * scale, dv * scale, angles="xy", scale_units="xy", scale=1,
+              pivot="middle", transform=view.projection, zorder=2.6, **arrow)
+    # Key, at the left (the wind key is at the right).
+    from matplotlib.patches import FancyArrow
+
+    fig.add_artist(FancyArrow(0.075, 0.11, 0.04, 0, width=0.004, head_width=0.012,
+                              head_length=0.01, length_includes_head=True, facecolor="white",
+                              edgecolor="black", linewidth=0.5, transform=fig.transFigure))
+    fig.text(0.095, 0.095, textwrap.fill(label, 14), ha="center", va="top", fontsize=8)
 
 
 #: Integration steps per curly vector (half upstream, half downstream).

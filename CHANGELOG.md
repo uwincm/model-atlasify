@@ -9,6 +9,19 @@
   roads and place names) instead, and `--basemap none` the old background.
   Tiles are cached; without network access the maps fall back to the plain
   background.
+- Dominant wave period maps use the cmocean "tempo" colour map reversed
+  (long-period swell light, without tempo's white end) and a 0-18 s colour bar
+  in 2 s steps (was viridis, 0-12 s in 1 s steps), so long-period swell is
+  resolved. Mean wave period maps use the same colour map, keeping their
+  0-12 s colour bar in 1 s steps.
+- Dominant and mean wave period maps draw the dominant and mean wave
+  direction as white same-length arrows, between the 10 m wind arrows.
+
+### Products
+- Dominant and mean wave direction (`dominant_wave_direction`, alias `dwd`;
+  `mean_wave_direction`, alias `mwd`) from DWM `dwd`/`mwd`: GeoTIFFs in
+  degrees clockwise from north that the waves come from (CF convention).
+  Part of `--variables waves`.
 
 ## 0.2.0 (2026-11-12)
 
