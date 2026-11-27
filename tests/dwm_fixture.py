@@ -33,15 +33,18 @@ def mercator_lonlat(nx: int, ny: int, dx: float, cen_lon: float, cen_lat: float)
 def write_dwm(run_dir: Path, times: list[datetime], *, nx: int = 40, ny: int = 24,
                dx: float = 50000.0, cen_lon: float = 180.0, cen_lat: float = 5.0,
                start: datetime | None = None, namelist: bool = True,
-               suffix: str = ".nc", lonlat: tuple[np.ndarray, np.ndarray] | None = None
-               ) -> list[Path]:
+               suffix: str = ".nc", lonlat: tuple[np.ndarray, np.ndarray] | None = None,
+               dwd: bool = True) -> list[Path]:
     """``lonlat`` = south-up (lon, lat) cell centres of another grid (e.g.
     Lambert conformal) to write instead of the Mercator grid; nx/ny then come
     from its shape.
 
     Fields (south-up, i = column, j = row):
-    swh = 1 + i / nx + hours since start; mwp = 5 + j / ny; dwp = 8 + i / nx.
-    Columns 0-4 of rows 0-4 are land (NaN, seamask 0)."""
+    swh = 1 + i / nx + hours since start; mwp = 5 + j / ny; dwp = 8 + i / nx;
+    dwd = pi * (i / nx - 0.5) and mwd = pi * (j / ny - 0.5) radians
+    counterclockwise from east, the way the waves go (neither if
+    ``dwd=False``, as in older output). Columns 0-4 of rows 0-4 are land (NaN,
+    seamask 0)."""
     out = run_dir / "output"
     out.mkdir(parents=True, exist_ok=True)
     start = start or times[0]
@@ -66,11 +69,14 @@ def write_dwm(run_dir: Path, times: list[datetime], *, nx: int = 40, ny: int = 2
                 "swh": (1 + ii / nx + hours, "m"), "mwp": (5 + jj / ny, "s"),
                 "dwp": (8 + ii / nx, "s"),
             }
+            if dwd:
+                fields["dwd"] = (np.pi * (ii / nx - 0.5), "rad")
+                fields["mwd"] = (np.pi * (jj / ny - 0.5), "rad")
             for name, (data, units) in fields.items():
                 v = nc.createVariable(name, "i4" if name == "seamask" else "f4", ("Time", "y", "x"))
                 v.units = units
                 v.description = name
-                if name in ("swh", "mwp", "dwp"):
+                if name in ("swh", "mwp", "dwp", "dwd", "mwd"):
                     data = np.where(land, np.nan, data)
                 v[0] = data
         paths.append(path)

@@ -64,9 +64,13 @@ changed, and [Next steps](#next-steps) for what comes next.
   (kg m-2 s-1, logarithmic colour scale), spray-mediated latent and sensible
   heat flux (W m-2)
 - **Waves** (DWM): significant wave height (m), mean wave period (s), dominant
-  wave period (s). Land is missing. Wave height maps use "turbo" with the
+  wave period (s), and mean and dominant wave direction (degrees, the
+  direction waves come from; GeoTIFFs, drawn as white arrows on the matching
+  period maps). Land is missing. Wave height maps use "turbo" with the
   lowest band (0–0.5 m) white, so calm seas and the wind vectors over them
-  stand out.
+  stand out. Wave period maps use cmocean "tempo" reversed (dark for short
+  periods, light for long-period swell) without its white end: 0–12 s in 1 s
+  steps for the mean period, 0–18 s in 2 s steps for the dominant period.
 - **Ocean surface** (HYCOM): sea surface temperature (`sst`, degC), sea
   surface salinity (`surface_salinity`, psu) and surface current speed
   (`surface_currents`, m s-1) maps with surface current vectors; GeoTIFFs of
@@ -251,7 +255,7 @@ modelatlasify INPUT_DIR [INPUT_DIR ...] [-o OUTPUT] [--model auto] [--variables 
 | `INPUT_DIR ...` | One or more run directories. Each one becomes one STAC Collection. |
 | `-o, --output` | Output directory (default `./atlas`), or `s3://bucket/prefix` to write to S3 (see [Output to S3](#output-to-s3)). Runs accumulate: runs already listed in `catalog.json` stay listed, and the current run is added (or regenerated in place if it is already there). Existing files with the same names are overwritten; nothing else is deleted. |
 | `--model` | `auto` (default): use every model whose output is found in each `INPUT_DIR`. For example, a coupled run directory with `wrfout_*` files and `output/umwmout_*` files gets both WRF and wave products in one STAC Collection, while a stand-alone DWM run gets only waves. `wrf`, `dwm` or `hycom` restricts the run to one model (`umwm` is accepted as an old name for `dwm`). |
-| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `temperature` (= `t2m`, which also makes `u10`/`v10` for its vectors), `upper_air` (= RH, geopotential height and `u`/`v` at 700 and 500 hPa; `700hpa` or `500hpa` = one level; `rh` or `geopotential_height` = that field at both levels, plus what its maps need), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `ocean` (= `sst` + `surface_salinity` + `surface_currents` + `surface_u` + `surface_v`; `currents` = the last three), `waves` (= `swh` + `mwp` + `dwp`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
+| `--variables` | Default: everything the models found can produce. Otherwise a list of `wind` (= `surface_wind_speed` + `u10` + `v10`), `temperature` (= `t2m`, which also makes `u10`/`v10` for its vectors), `upper_air` (= RH, geopotential height and `u`/`v` at 700 and 500 hPa; `700hpa` or `500hpa` = one level; `rh` or `geopotential_height` = that field at both levels, plus what its maps need), `precipitation` (= accumulated + interval), `olr` (= `olr` GeoTIFFs + `olr_precipitation` maps, which also makes `precipitation_interval` for the maps), `ocean` (= `sst` + `surface_salinity` + `surface_currents` + `surface_u` + `surface_v`; `currents` = the last three), `waves` (= `swh` + `mwp` + `dwp` + `mwd` + `dwd`, i.e. `significant_wave_height`, `mean_wave_period`, `dominant_wave_period`, `mean_wave_direction`, `dominant_wave_direction`), `spray` (= `mspr` + `hlspr` + `hsspr`, i.e. `spray_mass_flux`, `spray_latent_heat_flux`, `spray_sensible_heat_flux`), or exact names such as `precipitation_interval`. Each model makes the variables it can; asking for a variable that no model found can make is an error. Spray products are made only for runs with sea spray on (see below); for any other run they are skipped with a warning when requested, and left out without one by default. |
 | `--domains` | Only process these domains (`d01`, `d02`, ..., `DWM`). |
 | `--cut-dirs` | Output for `INPUT_DIR` goes to `OUTPUT/<absolute path of INPUT_DIR>`, e.g. `atlas/home/me/wrf/run01/`. `--cut-dirs=N` drops the first N directories of that path, like wget: `--cut-dirs=2` gives `atlas/wrf/run01/`. If N would remove every parent directory, only the run directory's own name is kept (`atlas/run01/`), with a warning; `--cut-dirs=99` is a simple way to always get that. The run's STAC Collection id is the same path joined with `--` (e.g. `home--me--wrf--run01`), which is unique and safe in URLs. The title is `WRF run run01` (or `WRF + DWM run run01`). |
 | `-np, --processes` | Worker processes for the per-time work (computing fields, writing GeoTIFFs, drawing maps). Default 1. Valid times are processed in parallel; the STAC catalog is still built in the main process. Each worker holds the domain grids plus a few fields in memory (roughly 100–200 MB for a 1649x699 grid). |
@@ -287,7 +291,7 @@ src/modelatlasify/
 │   ├── wind.py               surface_wind_speed definition; wind_speed(), destagger()
 │   ├── precipitation.py      precipitation definitions; interval_precipitation()
 │   ├── spray.py              sea spray mass flux, spray latent/sensible heat flux
-│   └── waves.py              significant wave height, mean/dominant wave period
+│   └── waves.py              significant wave height, mean/dominant wave period and direction
 ├── geospatial/
 │   ├── geotiff.py            COG writer
 │   ├── gridfit.py            regular grid (CRS + transform) from 2-D lon/lat
@@ -367,6 +371,27 @@ and `georeference_max_error_m` is null.
 
 Maps of a wave grid that is not Mercator or lon/lat are drawn in PlateCarree,
 in a box around the domain's outer edge plus 1° on every side.
+
+### Wave directions
+
+- `dominant_wave_direction` = DWM `dwd` (the direction the peak of the wave
+  spectrum travels) and `mean_wave_direction` = DWM `mwd` (the mean direction
+  of the spectrum). DWM writes both in radians counterclockwise from east
+  (earth-relative, like DWM's `wdir`, which matches WRF's earth-relative 10 m
+  wind). They are published in the CF convention instead: degrees clockwise
+  from true north that the waves come **from** (0 = from the north, 270 =
+  from the west), `(270 - degrees(dwd)) mod 360`. Units other than `rad` are
+  an error.
+- They are GeoTIFFs only, with no maps of their own. The matching period
+  maps (dominant direction on `dominant_wave_period`, mean direction on
+  `mean_wave_period`; per item and composites) draw them as white arrows with
+  black edges, all the same length, pointing the way the waves go. They sit
+  on the wind arrows' lattice shifted by half a spacing in x and y, so the
+  two sets of arrows fall between each other. A key at the bottom left names
+  them.
+- Requesting a wave period also makes its direction. Output without `dwd` or
+  `mwd` (older DWM/UMWM) skips that direction, and its period maps have no
+  direction arrows.
 
 ### Surface wind speed
 

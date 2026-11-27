@@ -80,7 +80,8 @@ def test_waves_only_run(tmp_path):
     items = sorted((run_dir / "items").iterdir())
     assert [p.name for p in items] == ["DWM-20261006T000000Z", "DWM-20261006T010000Z"]
     assert {p.name for p in items[0].glob("*.tif")} == {
-        "significant_wave_height.tif", "mean_wave_period.tif", "dominant_wave_period.tif"}
+        "significant_wave_height.tif", "mean_wave_period.tif", "dominant_wave_period.tif",
+        "dominant_wave_direction.tif", "mean_wave_direction.tif"}  # drawn as arrows only
     with rasterio.open(items[0] / "significant_wave_height.tif") as src:
         assert "Mercator" in src.crs.to_wkt() and np.isnan(src.read(1)[-1, 0])
     full = run_dir / "model-images" / "full"
@@ -326,6 +327,104 @@ def test_wave_maps_without_matching_wrf_times_have_no_vectors(tmp_path, monkeypa
     assert wave_maps and all(w == [] for w in wave_maps)
 
 
+def test_wave_directions_are_degrees_from_clockwise_from_north(tmp_path):
+    write_dwm(tmp_path, hourly(T0, 1))
+    adapter = DWMAdapter()
+    (ds,) = adapter.discover(tmp_path)
+    dwd = adapter.compute(ds, "dominant_wave_direction", 0)
+    # DWM: going pi * (i/NX - 0.5) counterclockwise from east, e.g. i = 0: going
+    # south = from the north (0); i = NX/2: going east = from the west (270).
+    to_ccw_from_east = np.degrees(np.pi * (np.arange(NX) / NX - 0.5))
+    np.testing.assert_allclose(dwd.data[0, 5:], ((270.0 - to_ccw_from_east) % 360.0)[5:],
+                               atol=1e-4)
+    assert dwd.data[0, NX // 2] == pytest.approx(270.0, abs=1e-4)
+    assert np.isnan(dwd.data[-5:, :5]).all()  # land
+    assert "degrees clockwise from north" in dwd.provenance["method"]
+    # mwd: pi * (j/NY - 0.5), j counted from the south (the data are north-up).
+    mwd = adapter.compute(ds, "mean_wave_direction", 0)
+    to_ccw_from_east = np.degrees(np.pi * (np.arange(NY)[::-1] / NY - 0.5))
+    np.testing.assert_allclose(mwd.data[:, 10], (270.0 - to_ccw_from_east) % 360.0, atol=1e-4)
+    assert mwd.provenance["source_variables"] == ["mwd"]
+
+
+def test_period_maps_get_wave_direction_markers(tmp_path, monkeypatch, capsys):
+    from modelatlasify.plotting import maps
+
+    run = tmp_path / "w"
+    write_dwm(run, hourly(T0, 1))
+    seen = []
+    real = maps._draw_map
+    monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (
+        seen.append((path.name, k.get("directions"))), real(path, *a, **k))[1])
+    assert main([str(run), "-o", str(tmp_path / "atlas"), "--no-validate",
+                 "--variables", "dwp,mwp,swh"]) == 0
+    err = capsys.readouterr().err
+    assert "Also making dominant_wave_direction" in err
+    assert "Also making mean_wave_direction" in err
+    for period, label in (("dominant_wave_period", "Dominant wave direction"),
+                          ("mean_wave_period", "Mean wave direction")):
+        drawn = [d for name, d in seen if f"{period}." in name]
+        assert len(drawn) == 2  # per-item map and composite
+        for lab, layers in drawn:
+            assert lab == label and len(layers) == 1
+            assert np.nanmax(layers[0][0]) <= 360.0
+    assert all(d is None for name, d in seen if "significant_wave_height" in name)
+
+
+def test_directions_missing_from_older_output_leave_out_the_markers(tmp_path, monkeypatch):
+    from modelatlasify.plotting import maps
+
+    run = tmp_path / "w"
+    write_dwm(run, hourly(T0, 1), dwd=False)
+    (ds,) = DWMAdapter().discover(run)
+    assert DWMAdapter().unavailable_variables(ds) == {
+        "dominant_wave_direction": "no 'dwd' in the DWM output",
+        "mean_wave_direction": "no 'mwd' in the DWM output"}
+    seen = []
+    real = maps._draw_map
+    monkeypatch.setattr(maps, "_draw_map", lambda path, *a, **k: (
+        seen.append(k.get("directions")), real(path, *a, **k))[1])
+    out = tmp_path / "atlas"
+    assert main([str(run), "-o", str(out), "--no-validate", "--variables", "dwp,mwp"]) == 0
+    assert seen == [None] * 4
+    assert not list(out.rglob("*_wave_direction.tif"))
+
+
+def test_direction_markers_point_the_way_the_waves_go():
+    import matplotlib.pyplot as plt
+    from matplotlib.quiver import Quiver
+    from pyproj import CRS
+    from rasterio.transform import from_origin
+
+    from modelatlasify.core.model import GridDefinition
+    from modelatlasify.plotting.maps import DIRECTION_LENGTH, _draw_directions, full_view
+
+    ny, nx, dx = 40, 80, 50e3
+    crs = CRS.from_proj4("+proj=merc +lat_ts=0 +lon_0=0 +R=6370000 +units=m")
+    grid = GridDefinition(crs=crs, transform=from_origin(0.0, ny * dx, dx, dx), width=nx,
+                          height=ny)
+    deg = np.full((ny, nx), 270.0)  # from the west
+    deg[:, nx // 2:] = 0.0  # from the north
+    view = full_view(grid)
+    fig = plt.figure()
+    ax = fig.add_axes([0, 0, 1, 1], projection=view.projection)
+    ax.set_extent(view.extent, crs=view.projection)
+    _draw_directions(fig, ax, view, ("Dominant wave direction", [(deg, grid)]))
+    (q,) = [c for c in ax.collections if isinstance(c, Quiver)]
+    x, u, v = q.X, np.asarray(q.U), np.asarray(q.V)
+    west, east = x < nx * dx / 2 - dx, x > nx * dx / 2 + dx
+    assert west.any() and east.any()
+    np.testing.assert_allclose(v[west], 0.0, atol=1e-6 * abs(u[west]).max())
+    assert (u[west] > 0).all()  # going east
+    np.testing.assert_allclose(u[east], 0.0, atol=1e-6 * abs(v[east]).max())
+    assert (v[east] < 0).all()  # going south
+    lengths = np.hypot(u, v)  # all the same length
+    np.testing.assert_allclose(lengths, lengths[0], rtol=1e-9)
+    step = min(250e3, nx * dx / 20)  # the wind lattice spacing (Mercator: 1 unit = 1 m at 0N)
+    assert lengths[0] == pytest.approx(DIRECTION_LENGTH * step, rel=1e-3)
+    plt.close(fig)
+
+
 def test_swh_lowest_band_is_white():
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
@@ -340,3 +439,22 @@ def test_swh_lowest_band_is_white():
     old = plt.get_cmap("turbo")(mcolors.BoundaryNorm(var.levels, 256, extend="max")(x))[:, :3]
     assert np.allclose(new[0], 1.0)  # 0-0.5 m is white
     np.testing.assert_allclose(new[1:], old[1:])  # every other band is turbo as before
+
+
+@pytest.mark.parametrize("name, levels", [
+    ("mean_wave_period", tuple(float(x) for x in range(0, 13))),  # 0-12 s every 1 s
+    ("dominant_wave_period", tuple(float(x) for x in range(0, 19, 2))),  # 0-18 s every 2 s
+])
+def test_period_maps_use_reversed_tempo_without_white(name, levels):
+    import cmocean
+
+    from modelatlasify.core.variables import get_variable
+
+    var = get_variable(name)
+    assert var.levels == levels and var.extend == "max"
+    rgba = var.cmap(np.arange(var.cmap.N))
+    assert var.cmap.N == len(levels)  # one colour per band, plus the "max" arrow
+    expected = cmocean.cm.tempo_r(np.linspace(0.0, 1.0, len(levels) + 1))[:-1]
+    np.testing.assert_allclose(rgba, expected)
+    assert rgba[:, :3].min(axis=1).max() < 0.95  # no white band
+    assert rgba[0, :3].sum() < rgba[-1, :3].sum()  # dark short periods, light long ones

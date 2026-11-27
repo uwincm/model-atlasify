@@ -270,10 +270,14 @@ def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
         vectors = [(*(computed[c].data for c in var.vectors), ds.grid_at(ti))]
     elif var.vectors and (other_winds or {}).get(var.vectors):
         vectors = _read_vectors(ds.run_id, other_winds[var.vectors])
+    directions = None  # direction markers (e.g. dominant wave direction)
+    if var.directions in computed:
+        directions = (get_variable(var.directions).long_name,
+                      [(computed[var.directions].data, ds.grid_at(ti))])
     title, subtitle = _titles(ds, fld, style.long_name, style.units, over)
     _worker["plot_field"](png, fld, ds.grid_at(ti), style, title, subtitle,
                           overlay=(get_variable(var.overlay), over) if var.overlay else None,
-                          vectors=vectors, vector_style=var.vector_style)
+                          vectors=vectors, vector_style=var.vector_style, directions=directions)
 
 
 # ------------------------------------------------------ composite maps
@@ -304,6 +308,9 @@ class _CompositeTask:
     # Wind vectors (VariableDefinition.vectors), coarsest first: from every
     # dataset of the run (of any model) with wind at this time.
     vectors: list[VectorSource] = field(default_factory=list)
+    # Direction markers (VariableDefinition.directions), coarsest first: from
+    # the map's own datasets, as (dataset_id, time index, GeoTIFF).
+    directions: list[tuple[str, int, Path]] = field(default_factory=list)
 
 
 def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: list[str],
@@ -348,6 +355,10 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
             over_base = products.get((base.dataset_id, valid, over_name)) if over_name else None
             vectors = (_vector_sources(run_datasets or datasets, valid, var.vectors, products)
                        if var.vectors else [])
+            directions = [(d.dataset_id, d.valid_times.index(valid), p[0])
+                          for d in sorted(datasets, key=lambda d: d.dataset_id)
+                          if var.directions
+                          and (p := products.get((d.dataset_id, valid, var.directions)))]
             layers, over_layers = [], []
             for nest in nests:
                 ni = nest_times[nest.dataset_id].get(valid)
@@ -361,7 +372,7 @@ def _composite_tasks(run_dir: Path, datasets: list[ModelDataset], variables: lis
             tasks.append(_CompositeTask(
                 base.run_id, vname, composite_path(run_dir, plot_area, vname, prefix, valid),
                 area, edge, (base.dataset_id, bi, tif, meta), layers,
-                over_base, over_layers, vectors))
+                over_base, over_layers, vectors, directions))
     return tasks
 
 
@@ -420,6 +431,11 @@ def _plot_composite(task: _CompositeTask) -> Path:
             for t, (_, grid) in zip(task.overlay_nests, nests)]
         overlay = (get_variable(var.overlay), over_layers)
     vectors = _read_vectors(task.run_id, task.vectors) if task.vectors else None
+    directions = None
+    if task.directions:
+        directions = (get_variable(var.directions).long_name,
+                      [(_read_tif(tif), datasets[(task.run_id, did)].grid_at(ti))
+                       for did, ti, tif in task.directions])
     title, subtitle = _titles(base_ds, meta, style.long_name, style.units,
                               None if task.overlay_base is None else over_meta)
     overlaid = [(nid, grid) for (nid, _, tif), (_, grid) in zip(task.nests, nests)
@@ -435,7 +451,7 @@ def _plot_composite(task: _CompositeTask) -> Path:
     return _worker["plot_composite"](task.path, (_read_tif(base_tif), base_ds.grid_at(bi)),
                                      nests, style, title, subtitle, area=task.area,
                                      domain_edge=task.edge, overlay=overlay, vectors=vectors,
-                                     vector_style=var.vector_style)
+                                     vector_style=var.vector_style, directions=directions)
 
 
 def _log_levels() -> dict[str, int]:
@@ -625,8 +641,10 @@ def _datasets_to_keep(datasets: list[ModelDataset], primary: list[str],
 
 def _dependencies(var: VariableDefinition) -> list[str]:
     """Other variables whose fields ``var``'s maps draw (draws, overlay,
-    vectors); not ``var`` itself (e.g. height over its own contours)."""
-    return [d for d in (var.draws, var.overlay, *(var.vectors or ())) if d and d != var.name]
+    vectors, directions); not ``var`` itself (e.g. height over its own
+    contours)."""
+    return [d for d in (var.draws, var.overlay, *(var.vectors or ()), var.directions)
+            if d and d != var.name]
 
 
 def _with_dependencies(variables: list[str], report: Callable[[str], None],
