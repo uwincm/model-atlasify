@@ -498,10 +498,15 @@ in a box around the domain's outer edge plus 1° on every side.
   to leave the fewest grid points of d01 (the run's outermost domain) outside
   the range at its first output time (or the next time whose `t2m` passes
   the checks). Of equally good shifts, the smallest is used, so a run that
-  fits -10 to 35 C keeps it. Every `t2m` map of the run (all domains and
-  times, per-item and composites) uses that range, and the run's line in the
-  output says which it is, e.g. `t2m colour scale for run '...': -20 to 25
-  degC (fits d01 at 2025-12-07 00:00 UTC)`. The GeoTIFFs are unaffected.
+  fits -10 to 35 C keeps it. Every whole-domain `t2m` map of the run (all
+  domains and times, per-item and composites) uses that range.
+- Each `--plot-sub-areas` area gets its own range by the same rule, from the
+  d01 points inside the area at that time, so its composites use the colours
+  on the temperatures they show. An area with no d01 points uses the
+  whole-domain range.
+- The run's line in the output says which ranges were chosen, e.g. `t2m colour
+  scale for run '...': -20 to 25, area 'pacnw' -25 to 20 degC (fits d01 at
+  2025-12-07 00:00 UTC)`. The GeoTIFFs are unaffected.
 - Its maps (per-item and composites) draw the 10 m wind vectors exactly as
   on the surface wind speed maps (see above).
 

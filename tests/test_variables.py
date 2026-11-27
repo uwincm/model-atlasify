@@ -465,6 +465,29 @@ def test_t2m_maps_shift_the_colour_scale_to_fit_d01_at_the_start(tmp_path, monke
     assert get_variable("t2m").levels[0] == -10.0  # the definition itself is unchanged
 
 
+def test_t2m_sub_area_maps_fit_their_own_area(tmp_path, monkeypatch, capsys):
+    from modelatlasify.cli import main
+    from modelatlasify.plotting import maps
+
+    run = tmp_path / "run"
+    write_wrfout(run, hourly(T0, 1), include=("U10", "V10", "T2"))  # T2: -10 C (W) to 40 C (E)
+    drawn = []
+    real = maps._draw_map
+    monkeypatch.setattr(maps, "_draw_map", lambda path, view, layers, variable, *a, **k: (
+        drawn.append((path.name, variable.levels[0], variable.levels[-1])),
+        real(path, view, layers, variable, *a, **k))[1])
+    # d01 is centred on 40N, 100W, about 5.6 degrees of longitude wide: "east"
+    # holds its eastern quarter, about 29 to 39 C.
+    assert main([str(run), "-o", str(tmp_path / "atlas"), "--no-validate", "--variables", "t2m",
+                 "--plot-sub-areas=east,-98.5,-96,35,45,away,10,20,40,50"]) == 0
+    assert "-10 to 35, area 'east' -5 to 40 degC" in capsys.readouterr().err
+    ranges = {name.split(".")[1] if name.startswith("uwincm.") else "item": (lo, hi)
+              for name, lo, hi in drawn}
+    # The whole domain (composite and per-item map) keeps -10..35 (as good as
+    # -5..40, and the smaller shift); "east" shifts to fit its warm points.
+    assert ranges == {"item": (-10.0, 35.0), "full": (-10.0, 35.0), "east": (-5.0, 40.0)}
+
+
 def test_t2m_levels_and_colours():
     import matplotlib.colors as mcolors
 
