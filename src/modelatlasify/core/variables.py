@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class VectorStyle:
@@ -52,6 +54,10 @@ class VariableDefinition:
     vmax: float | None = None
     # Levels for a discrete colour scale (overrides vmin/vmax when given).
     levels: tuple[float, ...] | None = None
+    # Set: each run's maps shift all the levels together by a multiple of this
+    # step, chosen to fit the field of the run's outermost domain at its first
+    # time (see shifted_levels). The width and spacing stay as in ``levels``.
+    levels_shift_step: float | None = None
     extend: str = "max"
     # Values at or below this are drawn transparent (e.g. no rain).
     transparent_below: float | None = None
@@ -92,6 +98,31 @@ class VariableDefinition:
     # blocks (None = no limit, e.g. precipitation is exactly 0 over dry areas).
     max_zero_fraction: float | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
+
+
+def shifted_levels(levels: tuple[float, ...], step: float, data: np.ndarray
+                   ) -> tuple[float, ...]:
+    """``levels`` shifted by the multiple of ``step`` that leaves the fewest
+    finite values of ``data`` outside them (below the first level or above the
+    last); of equally good shifts, the smallest. All missing: unchanged."""
+    finite = np.asarray(data, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return tuple(levels)
+    lo, hi = levels[0], levels[-1]
+    # Every shift that could matter: from the window's top at the data's
+    # minimum to its bottom at the data's maximum.
+    k_min = int(np.floor((finite.min() - hi) / step))
+    k_max = int(np.ceil((finite.max() - lo) / step))
+    finite = np.sort(finite)
+
+    def outside(k: int) -> int:
+        below = np.searchsorted(finite, lo + k * step, side="left")
+        above = finite.size - np.searchsorted(finite, hi + k * step, side="right")
+        return int(below + above)
+
+    best = min(range(k_min, k_max + 1), key=lambda k: (outside(k), abs(k)))
+    return tuple(float(round(v + best * step, 6)) for v in levels)
 
 
 _REGISTRY: dict[str, VariableDefinition] = {}

@@ -411,6 +411,60 @@ def test_t2m_zero_filled_is_rejected(tmp_path):
         adapter.compute(ds, "t2m", 0)
 
 
+def test_shifted_levels_fit_the_data_in_steps():
+    from modelatlasify.core.variables import shifted_levels
+    from modelatlasify.variables.temperature import T2M_LEVELS
+
+    def shift(data):
+        out = shifted_levels(T2M_LEVELS, 5.0, np.asarray(data, dtype=float))
+        assert np.allclose(np.diff(out), 1.5) and len(out) == len(T2M_LEVELS)  # same scale
+        return out[0], out[-1]
+
+    assert shift(np.linspace(-5.0, 30.0, 100)) == (-10.0, 35.0)  # fits already: unchanged
+    # Fits at -30..15, -35..10 and -40..5: the smallest shift wins.
+    assert shift(np.linspace(-30.0, -20.0, 100)) == (-30.0, 15.0)
+    # 90 values at 30-40 C and 10 at -10 C cannot all fit: -5..40 and 0..45
+    # leave out only the 10 (fewer than -10..35, which leaves out most of the
+    # warm ones); -5..40 is the smaller shift.
+    assert shift(np.r_[np.linspace(30.0, 40.0, 90), np.full(10, -10.0)]) == (-5.0, 40.0)
+    assert shift(np.r_[np.linspace(36.0, 44.0, 50), np.nan]) == (0.0, 45.0)  # NaN ignored
+    assert shift(np.full(4, np.nan)) == (-10.0, 35.0)  # nothing to fit
+
+
+def test_t2m_maps_shift_the_colour_scale_to_fit_d01_at_the_start(tmp_path, monkeypatch, capsys):
+    import netCDF4
+
+    from modelatlasify.cli import main
+    from modelatlasify.plotting import maps
+
+    run = tmp_path / "cold"
+    include = ("U10", "V10", "T2")
+    d01 = write_wrfout(run, hourly(T0, 3), include=include)
+    write_wrfout(run, hourly(T0, 3), include=include, domain=2, nx=20, ny=16, dx=4000.0)
+    with netCDF4.Dataset(d01[0], "a") as nc:  # first time zero-filled: fails the checks
+        nc["T2"][0] = 0.0
+    with netCDF4.Dataset(d01[1], "a") as nc:  # so the next one sets the scale: -28 to -20 C
+        nx = nc["T2"].shape[-1]
+        nc["T2"][0] = 245.15 + 8.0 * np.arange(nx) / nx
+    drawn = []
+    real = maps._draw_map
+    monkeypatch.setattr(maps, "_draw_map", lambda path, view, layers, variable, *a, **k: (
+        drawn.append((path.name, variable.levels)), real(path, view, layers, variable, *a, **k)
+    )[1])
+    assert main([str(run), "-o", str(tmp_path / "atlas"), "--no-validate",
+                 "--variables", "t2m"]) == 0
+    assert (f"cold': -30 to 15 degC (fits d01 at {T0 + timedelta(hours=1):%Y-%m-%d %H:%M} UTC)"
+            in capsys.readouterr().err)
+    t2m = [lv for name, lv in drawn if name.startswith("t2m") or ".t2m." in name]
+    # Per-item maps (d01 at its two good times, d02 at all three) and composites
+    # (over d01: its two good times).
+    assert len(t2m) == 2 + 3 + 2
+    assert all(lv[0] == -30.0 and lv[-1] == 15.0 for lv in t2m)
+    from modelatlasify.core.variables import get_variable
+
+    assert get_variable("t2m").levels[0] == -10.0  # the definition itself is unchanged
+
+
 def test_t2m_levels_and_colours():
     import matplotlib.colors as mcolors
 

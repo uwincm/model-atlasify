@@ -444,9 +444,18 @@ in a box around the domain's outer edge plus 1° on every side.
   to missing.
 - Maps use the NCL colour table
   [`t2m_29lev`](https://www.ncl.ucar.edu/Document/Graphics/ColorTables/t2m_29lev.shtml)
-  (30 colours) on levels every 1.5 C from -10 to 35 C: 30 intervals, one
-  colour each. Below -10 C and above 35 C take the first and last colours
-  (the colour bar's arrows). The colour bar labels every other level.
+  (30 colours) on levels every 1.5 C over a 45 C range, by default -10 to
+  35 C: 30 intervals, one colour each. Values below and above the range take
+  the first and last colours (the colour bar's arrows). The colour bar labels
+  every other level.
+- The range adapts to each run. All the levels shift together, in 5 C steps,
+  to leave the fewest grid points of d01 (the run's outermost domain) outside
+  the range at its first output time (or the next time whose `t2m` passes
+  the checks). Of equally good shifts, the smallest is used, so a run that
+  fits -10 to 35 C keeps it. Every `t2m` map of the run (all domains and
+  times, per-item and composites) uses that range, and the run's line in the
+  output says which it is, e.g. `t2m colour scale for run '...': -20 to 25
+  degC (fits d01 at 2025-12-07 00:00 UTC)`. The GeoTIFFs are unaffected.
 - Its maps (per-item and composites) draw the 10 m wind vectors exactly as
   on the surface wind speed maps (see above).
 

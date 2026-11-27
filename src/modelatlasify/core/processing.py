@@ -31,7 +31,7 @@ from modelatlasify.core.areas import FULL_AREA, SubArea
 from modelatlasify.core.catalog import AssetRecord, CatalogBuilder, ItemRecord
 from modelatlasify.core.errors import DiscoveryError, FieldQualityError, NoModelOutputError
 from modelatlasify.core.model import FieldResult, ModelAdapter, ModelDataset
-from modelatlasify.core.variables import VariableDefinition, get_variable
+from modelatlasify.core.variables import VariableDefinition, get_variable, shifted_levels
 from modelatlasify.geospatial.geotiff import write_geotiff
 from modelatlasify.models import AVAILABLE_MODELS, get_adapter
 
@@ -171,7 +171,8 @@ _worker: dict = {}
 
 def _init_worker(models: list[str], datasets: dict[tuple[str, str], ModelDataset], output: Path,
                  variables: list[str], plots: bool, log_levels: dict[str, int],
-                 basemap: str | None = None) -> None:
+                 basemap: str | None = None,
+                 run_levels: dict[tuple[str, str], tuple[float, ...]] | None = None) -> None:
     for name, level in log_levels.items():
         if name == "":
             logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
@@ -185,7 +186,14 @@ def _init_worker(models: list[str], datasets: dict[tuple[str, str], ModelDataset
     adapters = {a.name: a for a in map(get_adapter, models)}
     _worker.update(adapters=adapters, datasets=datasets,
                    builder=CatalogBuilder(output), variables=variables, plot_field=plot_field,
-                   plot_composite=plot_composite)
+                   plot_composite=plot_composite, run_levels=run_levels or {})
+
+
+def _run_style(run_id: str, var: VariableDefinition) -> VariableDefinition:
+    """``var`` with this run's colour levels, if they were adapted to the run
+    (VariableDefinition.levels_shift_step)."""
+    levels = _worker.get("run_levels", {}).get((run_id, var.name))
+    return var if levels is None else dataclasses.replace(var, levels=levels)
 
 
 def _close_worker() -> None:
@@ -263,7 +271,7 @@ def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
     renamed to the product), with the product's overlay taken from ``computed``
     (the fields that passed their checks at this time). Wind vectors come from
     ``computed`` too, or else from ``other_winds`` (another model's)."""
-    style = get_variable(var.draws) if var.draws else var
+    style = _run_style(ds.run_id, get_variable(var.draws) if var.draws else var)
     over = computed.get(var.overlay) if var.overlay else None
     vectors = None  # wind arrows
     if var.vectors and all(c in computed for c in var.vectors):
@@ -276,7 +284,8 @@ def _plot_item(png: Path, ds: ModelDataset, ti: int, fld: FieldResult,
                       [(computed[var.directions].data, ds.grid_at(ti))])
     title, subtitle = _titles(ds, fld, style.long_name, style.units, over)
     _worker["plot_field"](png, fld, ds.grid_at(ti), style, title, subtitle,
-                          overlay=(get_variable(var.overlay), over) if var.overlay else None,
+                          overlay=((_run_style(ds.run_id, get_variable(var.overlay)), over)
+                                   if var.overlay else None),
                           vectors=vectors, vector_style=var.vector_style, directions=directions)
 
 
@@ -417,7 +426,7 @@ def _plot_composite(task: _CompositeTask) -> Path:
     base_id, bi, base_tif, meta = task.base
     base_ds: ModelDataset = datasets[(task.run_id, base_id)]
     var = get_variable(task.variable)
-    style = get_variable(var.draws) if var.draws else var  # how the field is drawn
+    style = _run_style(task.run_id, get_variable(var.draws) if var.draws else var)  # as drawn
     nests = []
     for nid, ni, tif in task.nests:
         nest: ModelDataset = datasets[(task.run_id, nid)]
@@ -429,7 +438,7 @@ def _plot_composite(task: _CompositeTask) -> Path:
         over_layers = [(_read_tif(over_tif), base_ds.grid_at(bi))] + [
             (None if t is None else _read_tif(t), grid)
             for t, (_, grid) in zip(task.overlay_nests, nests)]
-        overlay = (get_variable(var.overlay), over_layers)
+        overlay = (_run_style(task.run_id, get_variable(var.overlay)), over_layers)
     vectors = _read_vectors(task.run_id, task.vectors) if task.vectors else None
     directions = None
     if task.directions:
@@ -507,11 +516,12 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
                 prefetch_geography(ds.grid)
             for area in options.sub_areas:
                 prefetch_geography(area)
+        run_levels = _adapt_levels(runs, variables, adapters, report) if options.plots else {}
         for adapter in adapter_list:
             adapter.close()  # workers open their own file handles
 
         init_args = (names, all_datasets, options.output, variables, options.plots,
-                     _log_levels(), options.basemap)
+                     _log_levels(), options.basemap, run_levels)
         n_tasks = sum(len(d.valid_times) for d in all_datasets.values())
         processes = min(options.processes, n_tasks)
         if processes > 1:
@@ -610,6 +620,41 @@ def run_pipeline(options: PipelineOptions, report: Callable[[str], None] = print
         n_animations=n_anim,
         skipped_files=skipped, quality_skips=quality_skips, seconds=time.monotonic() - t0,
     )
+
+
+def _adapt_levels(runs: dict[str, list[ModelDataset]], variables: list[str],
+                  adapters: dict[str, ModelAdapter], report: Callable[[str], None]
+                  ) -> dict[tuple[str, str], tuple[float, ...]]:
+    """Each run's colour levels for the variables that adapt them
+    (VariableDefinition.levels_shift_step), keyed by (run id, variable):
+    shifted to fit the field of the run's outermost domain that makes it
+    (e.g. d01) at its first time, or the next time whose field passes the
+    checks."""
+    out: dict[tuple[str, str], tuple[float, ...]] = {}
+    for run_id, datasets in runs.items():
+        for vname in variables:
+            var = get_variable(vname)
+            if var.levels is None or var.levels_shift_step is None:
+                continue
+            makers = [d for d in datasets if vname in adapters[d.model].dataset_variables(d)]
+            if not makers:
+                continue
+            base = min(makers, key=lambda d: d.dataset_id)
+            for ti, valid in enumerate(base.valid_times):
+                try:
+                    fld = adapters[base.model].compute(base, vname, ti)
+                    if fld is None:
+                        continue
+                    check_field(fld, var)
+                except FieldQualityError:
+                    continue
+                levels = shifted_levels(var.levels, var.levels_shift_step, fld.data)
+                out[(run_id, vname)] = levels
+                report(f"  {vname} colour scale for run '{base.run_path or run_id}': "
+                       f"{levels[0]:g} to {levels[-1]:g} {var.units} (fits {base.dataset_id} "
+                       f"at {valid:%Y-%m-%d %H:%M} UTC)")
+                break
+    return out
 
 
 def _variables_for(requested: list[str] | None, adapters: list[ModelAdapter]) -> list[str]:
